@@ -1,4 +1,5 @@
 from read_klee_testcases import main as rkt_main 
+from read_afl_testcases import main as rat_main
 import argparse
 import os, sys
 
@@ -13,7 +14,7 @@ def main():
     if args.target=="afl":
         rkt_main(args.input_dir, args.output_dir)
     elif args.target=="klee":
-        pass
+        rat_main(args.input_dir, args.output_dir)
     else:
         print("Target can be klee or afl only.")
         sys.exit(-1)
