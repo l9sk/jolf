@@ -7,68 +7,20 @@
 
 #include <fstream>
 #include <sstream>
+#include <list>
 
 #include <klee/Internal/ADT/KTest.h>
 
-//#include "Compat.h"
-//#include "TypeHelper.h"
 
 #define MIN(a,b)   (((a) < (b)) ? (a) : (b))
 
-/**
- * Helper pass to extract a ktest file from an inputfile and the functionname
- */
 using namespace std;
 using namespace llvm;
-	/*
-    static llvm::cl::opt<std::string> KTestFunction(
-		"ktestfunction",
-		llvm::cl::desc("Name of the function the ktest should be generated for"));
-    */
-	
-    /*
-    static llvm::cl::opt<std::string> AFLInputFile(
-		"aflinputfile",
-		llvm::cl::desc("Path to the fuzzer-input file containing the data"));
-
-	static llvm::cl::opt<std::string> KTestOut(
-		"ktestout",
-		llvm::cl::desc("Where to save the ktest file"));
-
-	static llvm::cl::opt<std::string> ArgType(
-		"argtype",
-		llvm::cl::desc("Type or mode of input: file or stdin"));
-	
-	static llvm::cl::opt<std::string> AFLObject(
-		"aflobject",
-		llvm::cl::desc("Object (binary or bitcode) used for fuzzing"));
-    */
-    /*
-    static llvm::cl::list<std::string> KleeArgs(
-		"kleeargs",
-		llvm::cl::desc("KleeArgs that should be saved in the ktest file"));
-    */
-
-	
-    /*
-    struct KTestGenerator : public llvm::ModulePass
-	{
-		static char ID; 
-
-		KTestGenerator() : llvm::ModulePass(ID) { };
-
-        //llvm::outs() << "Creating file...";
-		bool runOnModule(llvm::Module &M) override;
-	};
-    */
-
-
-//bool KTestGenerator::runOnModule(llvm::Module &M)
 int main(int argc, char* argv[])
 {
-    if (argc!=5)
+    if (argc<5)
     {
-        llvm::errs() << "Usage: generator.o aflinputfile ktestout argtype aflobject\n";
+        llvm::errs() << "Usage: generator.o aflinputfile ktestout argtype aflobject concrete-args\n";
         exit(-1);
     }
     assert(kTest_getCurrentVersion() == 3);
@@ -80,6 +32,8 @@ int main(int argc, char* argv[])
     std::string ArgType = argv[3];
 
     std::string AFLObject = argv[4];
+
+    std::vector<std::string> ConcreteArgs = {};
     
     /* Check all the command line arguments */
     if(AFLInputFile.empty())
@@ -102,11 +56,21 @@ int main(int argc, char* argv[])
         llvm::errs() << "Error: -aflobject cannot be empty!\n";
         return -1;
     }
-
+    
+    /* Did we pass any (command-line) arguments? */
+    if(argc>5)
+    {
+        for(int i=5; i<argc; i++)
+        {
+            ConcreteArgs.push_back(argv[i]);
+        }
+    }
+    
     /* Create and initialize the ktest object */
     KTest* newKTest = (KTest*)malloc(sizeof(KTest));
 
     /* These are zero because the input is either stdin or file */
+    /* No, actually they are zero because I don't know what the heck they do*/
     newKTest->symArgvs = 0;
     newKTest->symArgvLen = 0;
     
@@ -127,9 +91,6 @@ int main(int argc, char* argv[])
     
     //std::string inputStat = "abs";
     std::string inputStat = "\xff\xff\xff\xff\xff\xff\xff\xff\x01\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x00\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff";
-    size_t inputStatSize = strlen(inputStat.c_str());
-    
-    llvm::outs() << "Status: Read input data\n\tData: " << inputSize << "\n\tStat: " << inputStatSize << "\n"; 
     
     /* Now say what the arguments to KLEE should be */
     if(ArgType=="stdin")
@@ -141,38 +102,99 @@ int main(int argc, char* argv[])
         newKTest->numArgs =5;
     }
 
+    if(ConcreteArgs.size()>0)
+    {
+        /* "--sym-args 0 <max-args> <max-arg-len>" */
+        newKTest->numArgs += 4;
+    }
+
+    int argInd = 0;
+
     newKTest->args = (char**)malloc(sizeof(char*) * newKTest->numArgs);
-    newKTest->args[0] = (char*)malloc(AFLObject.size());
-    strcpy(newKTest->args[0], AFLObject.c_str());
-    newKTest->args[0][AFLObject.size()] = 0;
+    newKTest->args[argInd] = (char*)malloc(AFLObject.size());
+    strcpy(newKTest->args[argInd], AFLObject.c_str());
+    newKTest->args[argInd][AFLObject.size()] = 0;
     
+    argInd++;
+
+    /* Now again the concrete arguments */
+    if(ConcreteArgs.size()>0)
+    {
+        newKTest->args[argInd] = (char*)malloc(strlen("--sym-args"));
+        strcpy(newKTest->args[argInd], "--sym-args");
+        argInd++;
+        newKTest->args[argInd] = (char*)malloc(strlen("0"));
+        strcpy(newKTest->args[argInd], "0");
+        argInd++;
+        newKTest->args[argInd] = (char*)malloc(to_string(ConcreteArgs.size()).size());
+        strcpy(newKTest->args[argInd], to_string(ConcreteArgs.size()).c_str());
+        argInd++;
+        /* How long can each argument be? This long */
+        newKTest->args[argInd] = (char*)malloc(strlen("5"));
+        strcpy(newKTest->args[argInd], "5");
+        argInd++;
+    }
+
     if(ArgType=="stdin")
     {    
-        newKTest->args[1] = (char*)malloc(strlen("--sym-stdin"));
-        strcpy(newKTest->args[1], "--sym-stdin");
+        newKTest->args[argInd] = (char*)malloc(strlen("--sym-stdin"));
+        strcpy(newKTest->args[argInd], "--sym-stdin");
+        argInd++;
     }
     else
     {
         /* It will always only be one file, called "A" */
-        newKTest->args[1] = (char*)malloc(strlen("A"));
-        strcpy(newKTest->args[1], "A");
+        newKTest->args[argInd] = (char*)malloc(strlen("A"));
+        strcpy(newKTest->args[argInd], "A");
+        argInd++;
         /* Then fill the file A */
-        newKTest->args[2] = (char*)malloc(strlen("--sym-files"));
-        strcpy(newKTest->args[2], "--sym-files");
-        newKTest->args[3] = (char*)malloc(strlen("1"));
-        strcpy(newKTest->args[3], "1");
+        newKTest->args[argInd] = (char*)malloc(strlen("--sym-files"));
+        strcpy(newKTest->args[argInd], "--sym-files");
+        argInd++;
+        newKTest->args[argInd] = (char*)malloc(strlen("1"));
+        strcpy(newKTest->args[argInd], "1");
+        argInd++;
     }
 
-    newKTest->args[newKTest->numArgs-1] = (char*)malloc(ss.str().size());
-    strcpy(newKTest->args[newKTest->numArgs-1], ss.str().c_str());
+    newKTest->args[argInd] = (char*)malloc(ss.str().size()); // ss is the size, not the string
+    strcpy(newKTest->args[argInd], ss.str().c_str());
+    argInd++;
     
-    llvm::outs() << "Status: Set argv\n"; 
-
     /* Allocate array for KTestObjects */
-    newKTest->numObjects = 3; // data, stat and model_version
+    newKTest->numObjects = argInd; // command-line args, data, stat and model_version
+    if(ConcreteArgs.size()>0)
+    {
+        /* Need to add an "n_args" field */
+        newKTest->numObjects++;
+    }
+
     newKTest->objects = (KTestObject*)malloc(sizeof(KTestObject) * newKTest->numObjects);
     
     KTestObject* obj = newKTest->objects;
+
+    if(ConcreteArgs.size()>0)
+    {
+        obj->name = (char*)malloc(strlen("n_args")+1);
+        strcpy(obj->name, "n_args");
+        obj->numBytes = 4;
+        obj->bytes = (unsigned char*)malloc(sizeof(int));
+        int *d;
+        *d = ConcreteArgs.size();
+        memcpy(obj->bytes, d, obj->numBytes);
+
+        obj++;
+        for(int i=0; i<int(ConcreteArgs.size()); i++)
+        {
+            obj->name = (char*)malloc(strlen("arg0")+1);
+            char *argname = (char*)malloc(strlen("arg")+1);
+            strcpy(argname, "arg");
+            strcpy(obj->name, strcat(argname, to_string(i).c_str()));
+            obj->numBytes = strlen(ConcreteArgs.at(i).c_str());
+            obj->bytes = (unsigned char*)malloc(strlen(ConcreteArgs.at(i).c_str()));
+            memcpy(obj->bytes, ConcreteArgs.at(i).c_str(), obj->numBytes);
+            obj++;
+        }
+    }
 
     if(ArgType=="stdin")
     {
@@ -190,7 +212,6 @@ int main(int argc, char* argv[])
     
     obj->bytes = (unsigned char*)malloc(obj->numBytes);
     memcpy(obj->bytes, const_cast<char*>(inputBuffer.c_str()), obj->numBytes);
-    llvm::outs() << "Status: Set data object\n"; 
     
     obj++;
 
@@ -210,7 +231,6 @@ int main(int argc, char* argv[])
     
     obj->bytes = (unsigned char*)malloc(obj->numBytes);
     memcpy(obj->bytes, const_cast<char*>(inputStat.c_str()), obj->numBytes);
-    llvm::outs() << "Status: Set stat object\n";
 
     obj++;
 
@@ -221,24 +241,14 @@ int main(int argc, char* argv[])
     int *dum = (int*)malloc(sizeof(int));
     *dum = 1;
     memcpy(obj->bytes, dum, obj->numBytes);
-    llvm::outs() << "Status: Set model_version\n";
     
     /* Output the KTest to file */
     if(!kTest_toFile(newKTest, KTestOut.c_str()))
         llvm::errs() << "Unspecified error in kTest_toFile!\n";
 
-    llvm::outs() << "Freeing newKTest\n";
     kTest_free(newKTest);
-    llvm::outs() << "Status: Generated KTest file\n"; 
+    llvm::outs() << "Status: Generated KTest file: " << KTestOut << "\n"; 
 
     return 0;
 }
-
-//char KTestGenerator::ID = 0; /* Value is ignored */
-
-//static llvm::RegisterPass<KTestGenerator> X(
-//	"generate-ktest", "Create a ktest file from an AFL input",
-//	false, /* Does not only look at CFG */
-//	true   /* Is only analysis */
-//	);
 
