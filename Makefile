@@ -6,6 +6,7 @@ KLEE_INCLUDES   ?= $$HOME/build/klee/include/
 KLEE_LIB_PATH = $(KLEE_BUILDDIR)/lib
 
 # Set some variables to llvm dirs for compilation
+CXX				:= clang++-6.0
 LLVM_CONFIG     ?= /usr/bin/llvm-config
 
 TARGET          := KTestGenerator  # Name of the target
@@ -17,6 +18,7 @@ HEADERS         := $(shell find opt/src -name '*.h')
 #HELPER_SOURCES  := opt/helper_funcs/buffer_extract.c
 
 # Specific flags needed for compilation
+CXXFLAGS		+= -g -fsanitize=address -fno-omit-frame-pointer 
 CXXFLAGS        += $(shell $(LLVM_CONFIG) --cxxflags) 
 LDFLAGS         := $(shell $(LLVM_CONFIG) --ldflags)
 #LDFLAGS         := $(shell $(LLVM_CONFIG) --ldflags)

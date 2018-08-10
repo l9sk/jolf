@@ -18,9 +18,9 @@ using namespace std;
 using namespace llvm;
 int main(int argc, char* argv[])
 {
-    if (argc<5)
+    if (argc<3)
     {
-        llvm::errs() << "Usage: generator.o aflinputfile ktestout argtype aflobject concrete-args\n";
+        llvm::errs() << "Usage: KTestGenerator aflinputfile ktestout\n";
         exit(-1);
     }
     assert(kTest_getCurrentVersion() == 3);
@@ -29,11 +29,15 @@ int main(int argc, char* argv[])
     
     std::string KTestOut = argv[2];
 
-    std::string ArgType = argv[3];
+    std::string ArgType = "file";
 
-    std::string AFLObject = argv[4];
+    std::string AFLObject = "dummy.bc";
 
-    std::vector<std::string> ConcreteArgs = {};
+
+    size_t inputSize;
+    int argInd;
+    KTestObject* obj;
+    int *dum;
     
     /* Check all the command line arguments */
     if(AFLInputFile.empty())
@@ -57,23 +61,13 @@ int main(int argc, char* argv[])
         return -1;
     }
     
-    /* Did we pass any (command-line) arguments? */
-    if(argc>5)
-    {
-        for(int i=5; i<argc; i++)
-        {
-            ConcreteArgs.push_back(argv[i]);
-        }
-    }
-    
     /* Create and initialize the ktest object */
-    KTest* newKTest = (KTest*)malloc(sizeof(KTest));
+    KTest* newKTest = (KTest*)calloc(1, sizeof(KTest));
+    if(!newKTest) {
+        llvm::errs() << "Can't allocate memory";
+        return -1;
+    }
 
-    /* These are zero because the input is either stdin or file */
-    /* No, actually they are zero because I don't know what the heck they do*/
-    newKTest->symArgvs = 0;
-    newKTest->symArgvLen = 0;
-    
     newKTest->version = kTest_getCurrentVersion();
 
     /* Read the input file into buffer */
@@ -85,170 +79,146 @@ int main(int argc, char* argv[])
         inputBuffer = input_stream.str();
     }
     
-    size_t inputSize = inputBuffer.size();
-    std::stringstream ss;
-    ss << inputSize;
+    inputSize = inputBuffer.size();
     
     //std::string inputStat = "abs";
     std::string inputStat = "\xff\xff\xff\xff\xff\xff\xff\xff\x01\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x00\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff";
     
     /* Now say what the arguments to KLEE should be */
-    if(ArgType=="stdin")
-    {
-        newKTest->numArgs = 3;
-    }
-    else
-    {
-        newKTest->numArgs =5;
-    }
+    /* dummy.bc A --sym-files 1 1 <file_size>  */
+    newKTest->numArgs = 6;
 
-    if(ConcreteArgs.size()>0)
-    {
-        /* "--sym-args 0 <max-args> <max-arg-len>" */
-        newKTest->numArgs += 4;
-    }
-
-    int argInd = 0;
-
-    newKTest->args = (char**)malloc(sizeof(char*) * newKTest->numArgs);
-    newKTest->args[argInd] = (char*)malloc(AFLObject.size());
-    strcpy(newKTest->args[argInd], AFLObject.c_str());
-    newKTest->args[argInd][AFLObject.size()] = 0;
+    newKTest->args = (char**)calloc(newKTest->numArgs, sizeof(char*));
+    if(!newKTest->args)
+        goto error;
     
+    argInd = 0;
+
+    newKTest->args[argInd] = (char*)calloc(1, AFLObject.size()+1); // args[0]
+    if(!newKTest->args[argInd])
+        goto error;
+
+    strcpy(newKTest->args[argInd], AFLObject.c_str());
+    llvm::outs() << newKTest->args[argInd] << " ";
     argInd++;
 
-    /* Now again the concrete arguments */
-    if(ConcreteArgs.size()>0)
-    {
-        newKTest->args[argInd] = (char*)malloc(strlen("--sym-args"));
-        strcpy(newKTest->args[argInd], "--sym-args");
-        argInd++;
-        newKTest->args[argInd] = (char*)malloc(strlen("0"));
-        strcpy(newKTest->args[argInd], "0");
-        argInd++;
-        newKTest->args[argInd] = (char*)malloc(to_string(ConcreteArgs.size()).size());
-        strcpy(newKTest->args[argInd], to_string(ConcreteArgs.size()).c_str());
-        argInd++;
-        /* How long can each argument be? This long */
-        newKTest->args[argInd] = (char*)malloc(strlen("5"));
-        strcpy(newKTest->args[argInd], "5");
-        argInd++;
-    }
+    newKTest->args[argInd] = (char*)calloc(1, strlen("A")+1); // args[1]
+    if(!newKTest->args[argInd])
+        goto error;
 
-    if(ArgType=="stdin")
-    {    
-        newKTest->args[argInd] = (char*)malloc(strlen("--sym-stdin"));
-        strcpy(newKTest->args[argInd], "--sym-stdin");
-        argInd++;
-    }
-    else
-    {
-        /* It will always only be one file, called "A" */
-        newKTest->args[argInd] = (char*)malloc(strlen("A"));
-        strcpy(newKTest->args[argInd], "A");
-        argInd++;
-        /* Then fill the file A */
-        newKTest->args[argInd] = (char*)malloc(strlen("--sym-files"));
-        strcpy(newKTest->args[argInd], "--sym-files");
-        argInd++;
-        newKTest->args[argInd] = (char*)malloc(strlen("1"));
-        strcpy(newKTest->args[argInd], "1");
-        argInd++;
-    }
-
-    newKTest->args[argInd] = (char*)malloc(ss.str().size()); // ss is the size, not the string
-    strcpy(newKTest->args[argInd], ss.str().c_str());
+    strcpy(newKTest->args[argInd], "A");
+    llvm::outs() << newKTest->args[argInd] << " ";
     argInd++;
+    
+    newKTest->args[argInd] = (char*)calloc(1, strlen("--sym-files")+1); // args[2]
+    if(!newKTest->args[argInd])
+        goto error;
+
+    strcpy(newKTest->args[argInd], "--sym-files");
+    llvm::outs() << newKTest->args[argInd] << " ";
+    argInd++;
+    
+    newKTest->args[argInd] = (char*)calloc(1, strlen("1")+1); // args[3]
+    if(!newKTest->args[argInd])
+        goto error;
+
+    strcpy(newKTest->args[argInd], "1");
+    llvm::outs() << newKTest->args[argInd] << " ";
+    argInd++;
+    
+    newKTest->args[argInd] = (char*)calloc(1, strlen("1")+1); // args[4]
+    if(!newKTest->args[argInd])
+        goto error;
+
+    strcpy(newKTest->args[argInd], "1");
+    llvm::outs() << newKTest->args[argInd] << " ";
+    argInd++;
+   
+    newKTest->args[argInd] = (char*)calloc(1, std::to_string(inputSize).size()+1); // args[5]
+    if(!newKTest->args[argInd])
+        goto error;
+
+    strcpy(newKTest->args[argInd], std::to_string(inputSize).c_str());
+    llvm::outs() << newKTest->args[argInd] << "\n";
+    argInd++;
+
+    llvm::outs() << argInd << " arguments written\n";
+   
+    /* These are zero because the input is either stdin or file */
+    /* No, actually they are zero because I don't know what the heck they do*/
+    newKTest->symArgvs = 0;
+    newKTest->symArgvLen = 0;
     
     /* Allocate array for KTestObjects */
-    newKTest->numObjects = argInd; // command-line args, data, stat and model_version
-    if(ConcreteArgs.size()>0)
-    {
-        /* Need to add an "n_args" field */
-        newKTest->numObjects++;
-    }
+    /* Objects: A-data, A-data-stat, model_version */
+    newKTest->numObjects = 3; 
 
-    newKTest->objects = (KTestObject*)malloc(sizeof(KTestObject) * newKTest->numObjects);
-    
-    KTestObject* obj = newKTest->objects;
+    newKTest->objects = (KTestObject*)calloc(5, sizeof(*newKTest->objects));
+    if(!newKTest->objects)
+        goto error;
 
-    if(ConcreteArgs.size()>0)
-    {
-        obj->name = (char*)malloc(strlen("n_args")+1);
-        strcpy(obj->name, "n_args");
-        obj->numBytes = 4;
-        obj->bytes = (unsigned char*)malloc(sizeof(int));
-        int *d;
-        *d = ConcreteArgs.size();
-        memcpy(obj->bytes, d, obj->numBytes);
+    obj = newKTest->objects;
+    llvm::outs() << "\nWriting objects\n";
 
-        obj++;
-        for(int i=0; i<int(ConcreteArgs.size()); i++)
-        {
-            obj->name = (char*)malloc(strlen("arg0")+1);
-            char *argname = (char*)malloc(strlen("arg")+1);
-            strcpy(argname, "arg");
-            strcpy(obj->name, strcat(argname, to_string(i).c_str()));
-            obj->numBytes = strlen(ConcreteArgs.at(i).c_str());
-            obj->bytes = (unsigned char*)malloc(strlen(ConcreteArgs.at(i).c_str()));
-            memcpy(obj->bytes, ConcreteArgs.at(i).c_str(), obj->numBytes);
-            obj++;
-        }
-    }
-
-    if(ArgType=="stdin")
-    {
-        obj->name = (char*)malloc(5+1);
-        strcpy(obj->name, "stdin");
-        //obj->name[5]=0;
-    }
-    else if(ArgType=="file")
-    {
-        obj->name = (char*)malloc(6+1);
-        strcpy(obj->name, "A-data");
-        //obj->name[6]=0;
-    }
+    /* Finally add the data from AFL testcases */
+    llvm::outs() << "object 0: \n";
+    obj->name = (char*)calloc(1, strlen("A-data")+1);
+    if(!obj->name)
+        goto error;
+    strcpy(obj->name, "A-data");
+    llvm::outs() << "\tname: " << obj->name << "\n";
     obj->numBytes = inputSize;
-    
-    obj->bytes = (unsigned char*)malloc(obj->numBytes);
+    llvm::outs() << "\tnumBytes: " << obj->numBytes << "\n";
+    obj->bytes = (unsigned char*)calloc(1, obj->numBytes+1);
+    if(!obj->bytes)
+        goto error;
     memcpy(obj->bytes, const_cast<char*>(inputBuffer.c_str()), obj->numBytes);
-    
+    obj->bytes[obj->numBytes] = 0;
+    llvm::outs() << "\tbytes: " << obj->bytes << "\n";
     obj++;
 
-    if(ArgType=="stdin")
-    {
-        obj->name = (char*)malloc(10+1);
-        strcpy(obj->name, "stdin-stat");
-        obj->name[10]=0;
-    }
-    else if(ArgType=="file")
-    {
-        obj->name = (char*)malloc(11+1);
-        strcpy(obj->name, "A-data-stat");
-        obj->name[11]=0;
-    }
-    obj->numBytes = 144;
-    
-    obj->bytes = (unsigned char*)malloc(obj->numBytes);
-    memcpy(obj->bytes, const_cast<char*>(inputStat.c_str()), obj->numBytes);
-
+    obj->name = (char*)calloc(1, 11+1);
+    llvm::outs() << "object 1: \n";
+    if(!obj->name)
+        goto error;
+    strcpy(obj->name, "A-data-stat");
+    llvm::outs() << "\tname: " << obj->name << "\n";
+    obj->numBytes = inputStat.size();
+    llvm::outs() << "\tnumBytes: " << obj->numBytes << "\n";
+    obj->bytes = (unsigned char*)calloc(1, obj->numBytes+1);
+    if(!obj->bytes)
+        goto error;
+    memcpy(obj->bytes, inputStat.c_str(), obj->numBytes);
+    obj->bytes[obj->numBytes] = 0;
+    llvm::outs() << "\tbytes: " << obj->bytes << "\n";
     obj++;
-
-    obj->name = (char*)malloc(strlen("model_version")+1);
+    
+    obj->name = (char*)calloc(1, strlen("model_version")+1);
+    llvm::outs() << "object 2: \n";
+    if(!obj->name)
+        goto error;
     strcpy(obj->name, "model_version");
+    llvm::outs() << "\tname: " << obj->name << "\n";
     obj->numBytes = 4;
-    obj->bytes = (unsigned char*)malloc(sizeof(int));
-    int *dum = (int*)malloc(sizeof(int));
+    llvm::outs() << "\tnumBytes: " << obj->numBytes << "\n";
+    obj->bytes = (unsigned char*)calloc(1, sizeof(int));
+    if(!obj->bytes)
+        goto error;
+    dum = (int*)malloc(sizeof(int));
     *dum = 1;
     memcpy(obj->bytes, dum, obj->numBytes);
+    free(dum);
+    llvm::outs() << "\tbytes: " << obj->bytes << "\n";
     
-    /* Output the KTest to file */
-    if(!kTest_toFile(newKTest, KTestOut.c_str()))
-        llvm::errs() << "Unspecified error in kTest_toFile!\n";
-
+    if(!kTest_toFile(newKTest, const_cast<char*>(KTestOut.c_str())))
+        goto error;
     kTest_free(newKTest);
     llvm::outs() << "Status: Generated KTest file: " << KTestOut << "\n"; 
 
     return 0;
+  error:
+    llvm::outs() << "Encountered some error. Exiting without writing to file";
+    kTest_free(newKTest);
+    return -1;
 }
 
