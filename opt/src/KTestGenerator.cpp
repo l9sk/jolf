@@ -85,8 +85,8 @@ int main(int argc, char* argv[])
     std::string inputStat = "\xff\xff\xff\xff\xff\xff\xff\xff\x01\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x00\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff";
     
     /* Now say what the arguments to KLEE should be */
-    /* dummy.bc A --sym-files 1 1 <file_size>  */
-    newKTest->numArgs = 6;
+    /* dummy.bc A --sym-files 1 1 <file_size> --sym-stdin <stdin_size>  */
+    newKTest->numArgs = 8;
 
     newKTest->args = (char**)calloc(newKTest->numArgs, sizeof(char*));
     if(!newKTest->args)
@@ -139,9 +139,25 @@ int main(int argc, char* argv[])
         goto error;
 
     strcpy(newKTest->args[argInd], std::to_string(inputSize).c_str());
-    llvm::outs() << newKTest->args[argInd] << "\n";
+    llvm::outs() << newKTest->args[argInd] << " ";
     argInd++;
 
+    newKTest->args[argInd] = (char*)calloc(1, strlen("--sym-stdin")+1); // args[6]
+    if(!newKTest->args[argInd])
+        goto error;
+
+    strcpy(newKTest->args[argInd], "--sym-stdin");
+    llvm::outs() << newKTest->args[argInd] << " ";
+    argInd++;
+    
+    newKTest->args[argInd] = (char*)calloc(1, std::to_string(inputSize).size()+1); // args[7]
+    if(!newKTest->args[argInd])
+        goto error;
+
+    strcpy(newKTest->args[argInd], std::to_string(inputSize).c_str());
+    llvm::outs() << newKTest->args[argInd] << "\n";
+    argInd++;
+    
     llvm::outs() << argInd << " arguments written\n";
    
     /* These are zero because the input is either stdin or file */
@@ -150,8 +166,8 @@ int main(int argc, char* argv[])
     newKTest->symArgvLen = 0;
     
     /* Allocate array for KTestObjects */
-    /* Objects: A-data, A-data-stat, model_version */
-    newKTest->numObjects = 3; 
+    /* Objects: A-data, A-data-stat, stdin, stdin-stat, model_version */
+    newKTest->numObjects = 5; 
 
     newKTest->objects = (KTestObject*)calloc(5, sizeof(*newKTest->objects));
     if(!newKTest->objects)
@@ -177,24 +193,56 @@ int main(int argc, char* argv[])
     llvm::outs() << "\tbytes: " << obj->bytes << "\n";
     obj++;
 
-    obj->name = (char*)calloc(1, 11+1);
+    obj->name = (char*)calloc(1, strlen("A-data-stat")+1);
     llvm::outs() << "object 1: \n";
     if(!obj->name)
         goto error;
     strcpy(obj->name, "A-data-stat");
     llvm::outs() << "\tname: " << obj->name << "\n";
-    obj->numBytes = inputStat.size();
+    obj->numBytes = 144;
+    llvm::outs() << "\tnumBytes: " << obj->numBytes << "\n";
+    obj->bytes = (unsigned char*)calloc(1, 144);
+    if(!obj->bytes)
+        goto error;
+    memcpy(obj->bytes, inputStat.c_str(), inputStat.size());
+    // obj->bytes[obj->numBytes] = 0;
+    llvm::outs() << "\tbytes: " << obj->bytes << "\n";
+    obj++;
+    
+    llvm::outs() << "object 2: \n";
+    obj->name = (char*)calloc(1, strlen("stdin")+1);
+    if(!obj->name)
+        goto error;
+    strcpy(obj->name, "stdin");
+    llvm::outs() << "\tname: " << obj->name << "\n";
+    obj->numBytes = inputSize;
     llvm::outs() << "\tnumBytes: " << obj->numBytes << "\n";
     obj->bytes = (unsigned char*)calloc(1, obj->numBytes+1);
     if(!obj->bytes)
         goto error;
-    memcpy(obj->bytes, inputStat.c_str(), obj->numBytes);
+    memcpy(obj->bytes, const_cast<char*>(inputBuffer.c_str()), obj->numBytes);
     obj->bytes[obj->numBytes] = 0;
+    llvm::outs() << "\tbytes: " << obj->bytes << "\n";
+    obj++;
+
+    obj->name = (char*)calloc(1, strlen("stdin-stat")+1);
+    llvm::outs() << "object 3: \n";
+    if(!obj->name)
+        goto error;
+    strcpy(obj->name, "stdin-stat");
+    llvm::outs() << "\tname: " << obj->name << "\n";
+    obj->numBytes = 144;
+    llvm::outs() << "\tnumBytes: " << obj->numBytes << "\n";
+    obj->bytes = (unsigned char*)calloc(1, 144);
+    if(!obj->bytes)
+        goto error;
+    memcpy(obj->bytes, inputStat.c_str(), inputStat.size());
+    // obj->bytes[obj->numBytes] = 0;
     llvm::outs() << "\tbytes: " << obj->bytes << "\n";
     obj++;
     
     obj->name = (char*)calloc(1, strlen("model_version")+1);
-    llvm::outs() << "object 2: \n";
+    llvm::outs() << "object 4: \n";
     if(!obj->name)
         goto error;
     strcpy(obj->name, "model_version");
