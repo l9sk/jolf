@@ -17,6 +17,14 @@ def call_afl(max_time, seed_inputs_dir, output_dir, afl_object, argv):
         print("Exiting Jolf...")
         sys.exit(-1)
 
+def get_max_size_in_queue(afl_seed_out_dirs):
+    max_size = 0
+    for d in afl_seed_out_dirs:
+        for f in glob.glob(os.path.join(d, "queue") + "/id*"):
+            if os.path.getsize(f)>max_size:
+                max_size = os.path.getsize(f)
+    return max_size
+
 def call_klee(output_dir, max_time, klee_object, afl_seed_out_dirs):
     klee_command = [KLEE]
     
@@ -27,11 +35,14 @@ def call_klee(output_dir, max_time, klee_object, afl_seed_out_dirs):
     if len(afl_seed_out_dirs)>0:
         seeding_from_afl += ["-named-seed-matching", "-allow-seed-extension", "-zero-seed-extension"]
 
+    sym_file_size = get_max_size_in_queue(afl_seed_out_dirs)
+
+    print(sym_file_size)
     libc = ["-posix-runtime", "-libc=uclibc"]
     output = ["-output-dir="+output_dir]
-    timeout = ["-max-time="+max_time, "-watchdog"]
+    timeout = ["-max-time="+str(max_time), "-watchdog"]
     other_args = ["-only-output-states-covering-new", "-max-instruction-time=10", "-optimize", "-suppress-external-warnings", "-write-cov"]
-    sym_args = ["A", "--sym-args", "1", "2", "3", "--sym-files", "1", "100"]
+    sym_args = ["A", "--sym-args", "1", "2", "3", "--sym-files", "1", str(sym_file_size)]
 
     try:
         ret = subprocess.check_call(klee_command + seeding_from_afl + libc + output + timeout + other_args + [klee_object] + sym_args)
@@ -109,6 +120,17 @@ def get_klee_coverage(coverage_list, klee_out_dir):
 
     return coverage_list
 
+def sort_inputs_by_size(input_dirs):
+    size_dict = {}
+    for dir in input_dirs:
+        for f in glob.glob(dir+"/id:*"):
+            size = os.path.getsize(f)
+            if size not in size_dict.keys():
+                size_dict[size] = []
+            size_dict[size].append(f)
+
+    return size_dict
+
 def main():
     parser = argparse.ArgumentParser(description="AFL+KLEE flipper")
     parser.add_argument("-t", "--max-time-each", help="Max time(sec) allowed for each round of KLEE or AFL")
@@ -155,12 +177,34 @@ def main():
     if not os.path.isdir(os.path.join(args.all_output_dir, "init-fuzzing")):
         call_afl(args.max_time_each, seed_inputs_dir, os.path.join(args.all_output_dir, "init-fuzzing"), args.afl_object, "")
 
-    # Concolic execution with AFL seeds
-    if not os.path.isdir(os.path.join(args.all_output_dir, "klee0")):
-        call_klee(os.path.join(args.all_output_dir, "klee0"), args.max_time_each, args.klee_object, [os.path.join(args.all_output_dir, "init-fuzzing")])
+    # Sort fuzzing test-cases by size
+    file_size_dict = sort_inputs_by_size([os.path.join(os.path.join(args.all_output_dir, "init-fuzzing"), "queue")])
+
+    # Concolic execution with AFL seeds - grouped by seed-input size
+    if (int(args.max_time_each)/len(file_size_dict.keys()))<30:
+        max_time_klee_instance = 30 
+    else:
+        max_time_klee_instance = int(args.max_time_each)/len(file_size_dict.keys())
+    
+    print("AFL inputs grouped into %d groups"%(len(file_size_dict.keys())))
+    print("Allocating %f seconds for each KLEE instance"%(max_time_klee_instance))
+    time.sleep(2)
+    
+    for i, s in enumerate(file_size_dict.keys()):
+        if not os.path.isdir(os.path.join(args.all_output_dir, "klee"+str(i))):
+            if os.path.isdir("/tmp/afl-seed-group"):
+                os.system("rm -rf /tmp/afl-seed-group")
+            os.system("mkdir /tmp/afl-seed-group")
+            os.system("mkdir /tmp/afl-seed-group/queue")
+            for f in file_size_dict[s]:
+                os.system("cp %s /tmp/afl-seed-group/queue/"%(f))
+            
+            call_klee(os.path.join(args.all_output_dir, "klee"+str(i)), max_time_klee_instance, args.klee_object, ["/tmp/afl-seed-group"])
 
     # Read KLEE testcases and populate new seed-inputs folder
-    argv = process_klee_out(args.all_output_dir+"/klee0/", seed_inputs_dir)
+    argv = []
+    for k in glob.glob(args.all_output_dir+"/klee*"):
+        argv.extend(process_klee_out(k, seed_inputs_dir))
     
     argv = clean_argv(argv)
     print(argv)
@@ -186,7 +230,8 @@ def main():
     
     # Concolic execution again
     afl_seed_out_dirs = glob.glob(args.all_output_dir+"/fuzzing-*")
-    call_klee(os.path.join(args.all_output_dir, "klee1"), args.max_time_each, args.klee_object, afl_seed_out_dirs)
+    if not os.path.isdir(os.path.join(args.all_output_dir, "klee1")):
+        call_klee(os.path.join(args.all_output_dir, "klee1"), args.max_time_each, args.klee_object, afl_seed_out_dirs)
 
 if __name__=="__main__":
     main()
