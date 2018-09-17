@@ -228,10 +228,31 @@ def main():
         for i, arg in enumerate(argv):
             call_afl(max_time_fuzzing_instance, seed_inputs_dir, os.path.join(args.all_output_dir, "fuzzing-"+str(i)), args.afl_object, arg)
     
+    # Sort fuzzing test-cases by size
+    file_size_dict = sort_inputs_by_size(glob.glob(args.all_output_dir+"/fuzzing-*/queue"))
+
+    # Concolic execution with AFL seeds - grouped by seed-input size
+    if (int(args.max_time_each)/len(file_size_dict.keys()))<30:
+        max_time_klee_instance = 30 
+    else:
+        max_time_klee_instance = int(args.max_time_each)/len(file_size_dict.keys())
+    
+    print("AFL inputs grouped into %d groups"%(len(file_size_dict.keys())))
+    print("Allocating %f seconds for each KLEE instance"%(max_time_klee_instance))
+    time.sleep(2)
+    
     # Concolic execution again
-    afl_seed_out_dirs = glob.glob(args.all_output_dir+"/fuzzing-*")
-    if not os.path.isdir(os.path.join(args.all_output_dir, "klee1")):
-        call_klee(os.path.join(args.all_output_dir, "klee1"), args.max_time_each, args.klee_object, afl_seed_out_dirs)
+    for i, s in enumerate(file_size_dict.keys()):
+        if not os.path.isdir(os.path.join(args.all_output_dir, "klee-2-"+str(i))):
+            if os.path.isdir("/tmp/afl-seed-group"):
+                os.system("rm -rf /tmp/afl-seed-group")
+            os.system("mkdir /tmp/afl-seed-group")
+            os.system("mkdir /tmp/afl-seed-group/queue")
+            for f in file_size_dict[s]:
+                os.system("cp %s /tmp/afl-seed-group/queue/"%(f))
+            
+            afl_seed_out_dirs = "/tmp/afl-seed-group/"
+            call_klee(os.path.join(args.all_output_dir, "klee-2-"+str(i)), args.max_time_each, args.klee_object, [afl_seed_out_dirs])
 
 if __name__=="__main__":
     main()
