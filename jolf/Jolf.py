@@ -1,18 +1,23 @@
 from read_klee_testcases import main as rkt_main
 from read_klee_testcases import process_klee_out
 #from read_afl_testcases import main as rat_main
-import os, sys, time, glob
+import os, sys, time, glob, signal, json
+from os import kill
 from config import AFL_FUZZ, KLEE
 import subprocess
+from collections import OrderedDict
 
 class Jolf:
     PREFIXES = ["/home/ognawala/coreutils-8.30/", "/home/ognawala/coreutils-8.30-gcov/"]
 
     def call_afl(self, max_time, seed_inputs_dir, output_dir, afl_object, argv):
-        timeout = ["timeout", "--preserve-status", str(max_time)+"s"]
+        if max_time>0:
+            timeout = ["timeout", "--preserve-status", str(max_time)+"s"]
+        else:
+            timeout = []
         afl_command = [AFL_FUZZ, "-i", seed_inputs_dir, "-o", output_dir, afl_object, argv, "@@"]
         try:
-            ret = subprocess.check_call(timeout + afl_command)
+            return subprocess.Popen(timeout + afl_command)
         except subprocess.CalledProcessError:
             print("Exiting Jolf...")
             sys.exit(-1)
@@ -35,20 +40,25 @@ class Jolf:
         if len(afl_seed_out_dirs)>0:
             seeding_from_afl += ["-named-seed-matching", "-allow-seed-extension", "-zero-seed-extension"]
 
-        sym_file_size = get_max_size_in_queue(afl_seed_out_dirs)
+        sym_file_size = self.get_max_size_in_queue(afl_seed_out_dirs)
 
-        print(sym_file_size)
         libc = ["-posix-runtime", "-libc=uclibc"]
         output = ["-output-dir="+output_dir]
-        timeout = ["-max-time="+str(max_time), "-watchdog"]
+        if max_time>0:
+            timeout = ["-max-time="+str(max_time), "-watchdog"]
+        else:
+            timeout = []
+
         other_args = ["-only-output-states-covering-new", "-max-instruction-time=10", "-optimize", "-suppress-external-warnings", "-write-cov"]
         sym_args = ["A", "--sym-args", "1", "2", "3", "--sym-files", "1", str(sym_file_size)]
 
         try:
-            ret = subprocess.check_call(klee_command + seeding_from_afl + libc + output + timeout + other_args + [klee_object] + sym_args)
+            ret = subprocess.Popen(klee_command + seeding_from_afl + libc + output + timeout + other_args + [klee_object] + sym_args)
+            return ret
         except subprocess.CalledProcessError:
             print("Something wrong with the KLEE run...")
             #sys.exit(-1)
+            return None
 
     def clean_argv(self, argv):
         clean = []
@@ -122,12 +132,18 @@ class Jolf:
 
     def sort_inputs_by_size(self, input_dirs):
         size_dict = {}
+        
         for dir in input_dirs:
             for f in glob.glob(dir+"/id:*"):
-                size = os.path.getsize(f)
-                if size not in size_dict.keys():
-                    size_dict[size] = []
-                size_dict[size].append(f)
+                if not self.size_batch:
+                    if 0 not in size_dict.keys():
+                        size_dict[0] = []
+                    size_dict[0].append(f)
+                else:
+                    size = os.path.getsize(f)
+                    if size not in size_dict.keys():
+                        size_dict[size] = []
+                    size_dict[size].append(f)
 
         return size_dict
 
@@ -157,7 +173,7 @@ class Jolf:
 
         return 0
 
-    def _dispatch_timed(self):
+    def prepare_directory(self):
         seed_inputs_dir = os.path.join(self.all_output_dir, "all_seeds/")
 
         # Prepare directory
@@ -165,6 +181,11 @@ class Jolf:
             ret = subprocess.check_call(["mkdir", self.all_output_dir])
             ret = subprocess.check_call(["mkdir", seed_inputs_dir])
             os.system("cp " + os.path.join(self.afl_seed_inputs_dir, "* ") + seed_inputs_dir)
+
+        return seed_inputs_dir
+
+    def _dispatch_timed(self):
+        seed_inputs_dir = self.prepare_directory()
 
         # First fuzz
         if not os.path.isdir(os.path.join(self.all_output_dir, "init-fuzzing")):
@@ -247,19 +268,161 @@ class Jolf:
                 afl_seed_out_dirs = "/tmp/afl-seed-group/"
                 self.call_klee(os.path.join(self.all_output_dir, "klee-2-"+str(i)), self.max_time_klee_instance, self.klee_object, [afl_seed_out_dirs])
 
-    def __init__(self, mode, 
+    def parse_plot_data_line(self, line):
+        if line.startswith("#"):
+            return None
+        tokens = line.strip().split(",")
+
+        if len(tokens)==11:
+            for i, t in enumerate(tokens):
+                try:
+                    tokens[i] = int(tokens[i])
+                except Exception:
+                    pass
+            return tokens
+
+        return None
+
+    def afl_saturated(self, i):
+        while (not os.path.exists(os.path.join(os.path.join(self.all_output_dir, "fuzzing-"+str(i), "plot_data")))):
+            continue
+        
+        plot_data = open(os.path.join(os.path.join(self.all_output_dir, "fuzzing-"+str(i), "plot_data")))
+        
+        lines = reversed(plot_data.readlines())
+        
+        for line in lines:
+            progress = self.parse_plot_data_line(line)
+            if not progress: # Maybe start of the file
+                continue
+            if progress[0] in self.afl_progress.keys(): # We have already read this timestamp
+                break
+            self.afl_progress[progress[0]] = progress[1:]
+
+        zero_since = 0
+        for timestamp in reversed(sorted(self.afl_progress.keys())):
+            if self.afl_progress[timestamp][3]==0 and self.afl_progress[timestamp][4]==0: # pending_total and pending_favs
+                if self.afl_progress[timestamp][0]>0: # If more than one cycle is done then converge to an end faster
+                    zero_since += 2
+                else:
+                    zero_since += 1
+            else:
+                break
+        if zero_since>2: # If no new paths have been seen in the last 3 log items 
+            return True
+        return False
+    
+    def parse_klee_cov(self, f):
+        content = open(f)
+        
+        covered_lines = []
+
+        for line in content:
+            covered_lines.append(line.strip())
+
+        if not covered_lines==[]:
+            return covered_lines
+        
+        return None
+
+    def klee_saturated(self, i):
+        while (not os.path.exists(os.path.join(os.path.join(self.all_output_dir, "klee-"+str(i)), "test000001.cov"))): # Klee should have at least generated one input 
+            continue
+
+        new_covered = []
+        for f in glob.glob(os.path.join(self.all_output_dir, "klee-"+str(i))+"/test*.cov"):
+            if f in self.klee_progress.keys():
+                continue
+            print("Got new progress: %s"%(f))
+            self.klee_progress[f] = self.parse_klee_cov(f)
+            if self.klee_progress[f]:
+                new_covered.append(f)
+
+        if not new_covered==[]:
+            print("Continuing KLEE...")
+            return False
+
+        print("Halting KLEE. No progress for a long time.")
+        return True
+
+    def _dispatch_saturation(self):
+        seed_inputs_dir = self.prepare_directory()
+
+        start_time = time.time()
+        fuzzing_i = 1
+        klee_i = 1
+        
+        while(time.time()-start_time < int(self.max_time_each)):
+            fuzzing_i = len(glob.glob(self.all_output_dir+"/fuzzing-*")) + 1
+            # Read KLEE testcases and populate new seed-inputs folder
+            argv = []
+            for k in glob.glob(self.all_output_dir+"/klee-*"):
+                argv.extend(process_klee_out(k, seed_inputs_dir))
+            
+            argv = self.clean_argv(argv)
+            print(argv)
+            time.sleep(2)
+            
+            #sys.exit(-1)
+
+            # How many sets of command line arguments were found by KLEE?
+            if len(argv)==0:
+                argv = [" "]
+            
+            for i, arg in enumerate(argv):
+                if not os.path.isdir(os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i))):
+                    proc = self.call_afl(0, seed_inputs_dir, os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i)), self.afl_object, arg)
+                    afl_saturate = False
+                    while (not afl_saturate):
+                        time.sleep(6) # 1 second more than how often plot_data is updated 
+                        afl_saturate = self.afl_saturated(fuzzing_i)
+
+                    kill(proc.pid, signal.SIGINT)
+                    time.sleep(3) # Wait for AFL to exit
+                    #fuzzing_i += 1
+            
+            # Sort afl test-cases by size
+            file_size_dict = self.sort_inputs_by_size(glob.glob(self.all_output_dir+"/fuzzing-*/queue"))
+            print("AFL inputs grouped into %d groups"%(len(file_size_dict.keys())))
+            time.sleep(1)
+            
+            klee_i = len(glob.glob(self.all_output_dir+"/klee-*")) + 1
+            for i, s in enumerate(file_size_dict.keys()):
+                if not os.path.isdir(os.path.join(self.all_output_dir, "klee-"+str(klee_i))):
+                    if os.path.isdir("/tmp/afl-seed-group"):
+                        os.system("rm -rf /tmp/afl-seed-group")
+                    os.system("mkdir /tmp/afl-seed-group")
+                    os.system("mkdir /tmp/afl-seed-group/queue")
+                    for f in file_size_dict[s]:
+                        os.system("cp %s /tmp/afl-seed-group/queue/"%(f))
+                    
+                    proc = self.call_klee(os.path.join(self.all_output_dir, "klee-"+str(klee_i)), 0, self.klee_object, ["/tmp/afl-seed-group"])
+                    klee_saturate = False
+                    while (not klee_saturate):
+                        time.sleep(20) # Takes a lot of time for KLEE to generate anything meaningful + more time for seeding
+                        klee_saturate = self.klee_saturated(klee_i)
+                    
+                    kill(proc.pid, signal.SIGINT)
+                    time.sleep(15) # Might take a long time for KLEE to be killed properly
+                    #klee_i += 1
+
+    def __init__(self, 
+            mode, 
             max_time_each, 
             afl_seed_inputs_dir, 
             all_output_dir, 
             klee_object, 
             afl_object, 
             coverage_source, 
-            coverage_executable):
+            coverage_executable,
+            size_batch):
         
         if mode=="timed":
             self.dispatch_method = self._dispatch_timed
         elif mode=="coverage":
             self.dispatch_method = self._dispatch_coverage
+        elif mode=="saturation":
+            self.dispatch_method = self._dispatch_saturation
         
         self.max_time_each = max_time_each
         self.afl_seed_inputs_dir = afl_seed_inputs_dir
@@ -268,4 +431,8 @@ class Jolf:
         self.afl_object = afl_object
         self.coverage_source = coverage_source
         self.coverage_executable = coverage_executable
+        self.size_batch = size_batch
+
+        self.afl_progress = {}
+        self.klee_progress = {}
         
