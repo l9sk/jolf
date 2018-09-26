@@ -49,7 +49,7 @@ class Jolf:
         else:
             timeout = []
 
-        other_args = ["-only-output-states-covering-new", "-max-instruction-time=10", "-optimize", "-suppress-external-warnings", "-write-cov"]
+        other_args = ["-only-output-states-covering-new", "-max-instruction-time=10", "-optimize", "-suppress-external-warnings", "-write-cov", "-istats-write-interval=1"]
         sym_args = ["A", "--sym-args", "1", "2", "3", "--sym-files", "1", str(sym_file_size)]
 
         try:
@@ -325,10 +325,25 @@ class Jolf:
         
         return None
 
-    def klee_saturated(self, i):
-        while (not os.path.exists(os.path.join(os.path.join(self.all_output_dir, "klee-"+str(i)), "test000001.cov"))): # Klee should have at least generated one input 
-            continue
+    def parse_run_istats(self, istats_file):
+        istats = open(istats_file)
+        found_new = False
+        
+        for line in istats:
+            tokens = line.split()
+            if len(tokens)!=15:
+                continue
+            instr, cov = int(tokens[0]), int(tokens[2])
+            if (instr not in self.klee_progress.keys()) and (cov>0):
+                self.klee_progress[instr] = cov
+                found_new = True
 
+        return found_new
+
+    def klee_saturated(self, i):
+        while (not os.path.exists(os.path.join(os.path.join(self.all_output_dir, "klee-"+str(i)), "run.istats"))): # Klee should have at least done something 
+            continue
+        """
         new_covered = []
         for f in glob.glob(os.path.join(self.all_output_dir, "klee-"+str(i))+"/test*.cov"):
             if f in self.klee_progress.keys():
@@ -343,6 +358,17 @@ class Jolf:
             return False
 
         print("Halting KLEE. No progress for a long time.")
+        """
+        old_covered = len(self.klee_progress.keys())
+        new_covered = {}
+
+        os.system("cp " + os.path.join(os.path.join(self.all_output_dir, "klee-"+str(i)), "run.istats") + " /tmp/run.istats")
+        new_covered = self.parse_run_istats("/tmp/run.istats")
+        if new_covered:
+            print("New KLEE coverage: From %d to %d"%(old_covered, len(self.klee_progress.keys())))
+            return False
+
+        print("KLEE seems to have saturated. Halting now ...")
         return True
 
     def _dispatch_saturation(self):
@@ -397,9 +423,13 @@ class Jolf:
                         os.system("cp %s /tmp/afl-seed-group/queue/"%(f))
                     
                     proc = self.call_klee(os.path.join(self.all_output_dir, "klee-"+str(klee_i)), 0, self.klee_object, ["/tmp/afl-seed-group"])
+                    seed_inputs = len(os.listdir("/tmp/afl-seed-group/"))
+                    time.sleep(10*seed_inputs) # Give KLEE some seeding time 
+
                     klee_saturate = False
                     while (not klee_saturate):
-                        time.sleep(20) # Takes a lot of time for KLEE to generate anything meaningful + more time for seeding
+                        seed_inputs = len(os.listdir("/tmp/afl-seed-group/"))
+                        time.sleep(10) # Takes a lot of time for KLEE to generate anything meaningful
                         klee_saturate = self.klee_saturated(klee_i)
                     
                     kill(proc.pid, signal.SIGINT)
