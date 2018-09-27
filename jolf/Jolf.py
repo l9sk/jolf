@@ -164,7 +164,7 @@ class Jolf:
         self.LOG("Dispatch method: %s"%(self.dispatch_method.__name__))
         self.dispatch_method()
         self.LOG("Dispatch method returned")
-        self.LOG("Exiting Jolf.")
+        self.LOG("Exiting JolfExiting Jolf..")
 
     def _dispatch_coverage(self):
         print("Calculating coverage...")
@@ -498,6 +498,9 @@ class Jolf:
         self.coverage_source = coverage_source
         self.coverage_executable = coverage_executable
         self.size_batch = size_batch
+
+        if not os.path.isdir(self.all_output_dir):
+            os.system("mkdir "+self.all_output_dir)
 
         log_line = "Jolf object created\n"
         log_line += "\tMax time: %s\n"%(self.max_time_each)
