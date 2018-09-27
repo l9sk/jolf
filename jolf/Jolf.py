@@ -284,6 +284,9 @@ class Jolf:
         return None
 
     def afl_saturated(self, i):
+        if (time.time() - self.start_time) > int(self.max_time_each):
+            return True
+
         while (not os.path.exists(os.path.join(os.path.join(self.all_output_dir, "fuzzing-"+str(i), "plot_data")))):
             continue
         
@@ -349,6 +352,9 @@ class Jolf:
         return found_new
 
     def klee_saturated(self, i):
+        if (time.time() - self.start_time) > int(self.max_time_each):
+            return True
+        
         while (not os.path.exists(os.path.join(os.path.join(self.all_output_dir, "klee-"+str(i)), "run.istats"))): # Klee should have at least done something 
             continue
         """
@@ -383,11 +389,11 @@ class Jolf:
     def _dispatch_saturation(self):
         seed_inputs_dir = self.prepare_directory()
 
-        start_time = time.time()
+        self.start_time = time.time()
         fuzzing_i = 1
         klee_i = 1
         
-        while(time.time()-start_time < int(self.max_time_each)):
+        while(time.time()-self.start_time < int(self.max_time_each)):
             fuzzing_i = len(glob.glob(self.all_output_dir+"/fuzzing-*")) + 1
             # Read KLEE testcases and populate new seed-inputs folder
             argv = []
@@ -475,4 +481,5 @@ class Jolf:
 
         self.afl_progress = {}
         self.klee_progress = {}
+        self.start_time = 0
         
