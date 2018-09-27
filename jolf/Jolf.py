@@ -333,10 +333,18 @@ class Jolf:
             tokens = line.split()
             if len(tokens)!=15:
                 continue
-            instr, cov = int(tokens[0]), int(tokens[2])
-            if (instr not in self.klee_progress.keys()) and (cov>0):
-                self.klee_progress[instr] = cov
-                found_new = True
+            llvm, src, cov = int(tokens[0]), int(tokens[1]), int(tokens[2]) # Read source-level coverage rather than LLVM level
+            
+            if (cov>0):
+                if src not in self.klee_progress.keys(): # Definitely new source-level coverage
+                    self.klee_progress[src] = {}
+                    self.klee_progress[src][llvm] = cov # The same line number could have been from any source file. Use LLVM instruction number to differentiate
+                    found_new = True
+                elif llvm not in self.klee_progress[src].keys(): # The covered LLVM instruction is newly covered, but source line was seen before
+                    self.klee_progress[src][llvm] = cov # The source line corresponds to a different file number from the one seen before
+                    found_new = True
+                else:
+                    found_new = False # The pair (llvm, src) has been seen before. No new coverage
 
         return found_new
 
@@ -359,13 +367,14 @@ class Jolf:
 
         print("Halting KLEE. No progress for a long time.")
         """
-        old_covered = len(self.klee_progress.keys())
+        len_old_covered = len([len(self.klee_progress[k].keys()) for k in self.klee_progress.keys()])
         new_covered = {}
 
         os.system("cp " + os.path.join(os.path.join(self.all_output_dir, "klee-"+str(i)), "run.istats") + " /tmp/run.istats")
         new_covered = self.parse_run_istats("/tmp/run.istats")
         if new_covered:
-            print("New KLEE coverage: From %d to %d"%(old_covered, len(self.klee_progress.keys())))
+            len_new_covered = len([len(self.klee_progress[k].keys()) for k in self.klee_progress.keys()])
+            print("New KLEE coverage: From %d to %d"%(len_old_covered, len_new_covered))
             return False
 
         print("KLEE seems to have saturated. Halting now ...")
@@ -405,7 +414,7 @@ class Jolf:
 
                     kill(proc.pid, signal.SIGINT)
                     time.sleep(3) # Wait for AFL to exit
-                    #fuzzing_i += 1
+                    fuzzing_i += 1
             
             # Sort afl test-cases by size
             file_size_dict = self.sort_inputs_by_size(glob.glob(self.all_output_dir+"/fuzzing-*/queue"))
@@ -423,18 +432,19 @@ class Jolf:
                         os.system("cp %s /tmp/afl-seed-group/queue/"%(f))
                     
                     proc = self.call_klee(os.path.join(self.all_output_dir, "klee-"+str(klee_i)), 0, self.klee_object, ["/tmp/afl-seed-group"])
-                    seed_inputs = len(os.listdir("/tmp/afl-seed-group/"))
-                    time.sleep(10*seed_inputs) # Give KLEE some seeding time 
+                    seed_inputs = len(os.listdir("/tmp/afl-seed-group/queue/"))
+                    print("Giving %d seconds to KLEE seeding"%(10*seed_inputs))
+                    time.sleep(5*seed_inputs) # Give KLEE some seeding time 
 
                     klee_saturate = False
                     while (not klee_saturate):
                         seed_inputs = len(os.listdir("/tmp/afl-seed-group/"))
-                        time.sleep(10) # Takes a lot of time for KLEE to generate anything meaningful
+                        time.sleep(5) # Takes a lot of time for KLEE to generate anything meaningful
                         klee_saturate = self.klee_saturated(klee_i)
                     
                     kill(proc.pid, signal.SIGINT)
-                    time.sleep(15) # Might take a long time for KLEE to be killed properly
-                    #klee_i += 1
+                    time.sleep(5) # Might take a long time for KLEE to be killed properly
+                    klee_i += 1
 
     def __init__(self, 
             mode, 
