@@ -10,7 +10,15 @@ from collections import OrderedDict
 class Jolf:
     PREFIXES = ["/home/ognawala/coreutils-8.30/", "/home/ognawala/coreutils-8.30-gcov/"]
 
+    def LOG(self, line):
+        log_file = open(os.path.join(self.all_output_dir, "jolf.log"), "a+")
+        log_file.write("%s: %s\n"%(time.ctime(None), line))
+        log_file.close()
+        
     def call_afl(self, max_time, seed_inputs_dir, output_dir, afl_object, argv):
+        self.LOG("Calling AFL")
+        self.LOG("\tMax-time: %d, output-dir: %s, argv: %s"%(max_time, output_dir, argv))
+
         if max_time>0:
             timeout = ["timeout", "--preserve-status", str(max_time)+"s"]
         else:
@@ -19,6 +27,7 @@ class Jolf:
         try:
             return subprocess.Popen(timeout + afl_command)
         except subprocess.CalledProcessError:
+            self.LOG("Encountered error in call_afl (subprocess.Popen).\n\tExiting now.")
             print("Exiting Jolf...")
             sys.exit(-1)
 
@@ -31,6 +40,9 @@ class Jolf:
         return max_size
 
     def call_klee(self, output_dir, max_time, klee_object, afl_seed_out_dirs):
+        self.LOG("Calling KLEE")
+        self.LOG("\tMax-time: %d, output-dir: %s"%(max_time, output_dir))
+
         klee_command = [KLEE]
         
         # Seeding related arguments
@@ -56,6 +68,7 @@ class Jolf:
             ret = subprocess.Popen(klee_command + seeding_from_afl + libc + output + timeout + other_args + [klee_object] + sym_args)
             return ret
         except subprocess.CalledProcessError:
+            self.LOG("Encountered error in call_klee (subprocess.Popen).\n\tExiting now.")
             print("Something wrong with the KLEE run...")
             #sys.exit(-1)
             return None
@@ -148,7 +161,10 @@ class Jolf:
         return size_dict
 
     def dispatch(self):
+        self.LOG("Dispatch method: %s"%(self.dispatch_method.__name__))
         self.dispatch_method()
+        self.LOG("Dispatch method returned")
+        self.LOG("Exiting Jolf.")
 
     def _dispatch_coverage(self):
         print("Calculating coverage...")
@@ -285,6 +301,7 @@ class Jolf:
 
     def afl_saturated(self, i):
         if (time.time() - self.start_time) > int(self.max_time_each):
+            self.LOG("AFL saturated because of timeout.")
             return True
 
         while (not os.path.exists(os.path.join(os.path.join(self.all_output_dir, "fuzzing-"+str(i), "plot_data")))):
@@ -312,7 +329,10 @@ class Jolf:
             else:
                 break
         if zero_since>2: # If no new paths have been seen in the last 3 log items 
+            self.LOG("AFL saturated because zero_since=%d."%(zero_since))
             return True
+        
+        self.LOG("Continuing AFL. zero_since=%d"%(zero_since))
         return False
     
     def parse_klee_cov(self, f):
@@ -353,6 +373,7 @@ class Jolf:
 
     def klee_saturated(self, i):
         if (time.time() - self.start_time) > int(self.max_time_each):
+            self.LOG("KLEE saturated because of timeout.")
             return True
         
         while (not os.path.exists(os.path.join(os.path.join(self.all_output_dir, "klee-"+str(i)), "run.istats"))): # Klee should have at least done something 
@@ -380,10 +401,10 @@ class Jolf:
         new_covered = self.parse_run_istats("/tmp/run.istats")
         if new_covered:
             len_new_covered = len([len(self.klee_progress[k].keys()) for k in self.klee_progress.keys()])
-            print("New KLEE coverage: From %d to %d"%(len_old_covered, len_new_covered))
+            self.LOG("Continuing KLEE. Line coverage increased from %d to %d"%(len_old_covered, len_new_covered))
             return False
 
-        print("KLEE seems to have saturated. Halting now ...")
+        self.LOG("KLEE saturated. No new line-coverage found")
         return True
 
     def _dispatch_saturation(self):
@@ -424,8 +445,7 @@ class Jolf:
             
             # Sort afl test-cases by size
             file_size_dict = self.sort_inputs_by_size(glob.glob(self.all_output_dir+"/fuzzing-*/queue"))
-            print("AFL inputs grouped into %d groups"%(len(file_size_dict.keys())))
-            time.sleep(1)
+            self.LOG("AFL inputs grouped into %d groups"%(len(file_size_dict.keys())))
             
             klee_i = len(glob.glob(self.all_output_dir+"/klee-*")) + 1
             for i, s in enumerate(file_size_dict.keys()):
@@ -439,7 +459,7 @@ class Jolf:
                     
                     proc = self.call_klee(os.path.join(self.all_output_dir, "klee-"+str(klee_i)), 0, self.klee_object, ["/tmp/afl-seed-group"])
                     seed_inputs = len(os.listdir("/tmp/afl-seed-group/queue/"))
-                    print("Giving %d seconds to KLEE seeding"%(10*seed_inputs))
+                    self.LOG("Giving %d seconds to KLEE for seeding"%(5*seed_inputs))
                     time.sleep(5*seed_inputs) # Give KLEE some seeding time 
 
                     klee_saturate = False
@@ -449,7 +469,7 @@ class Jolf:
                         klee_saturate = self.klee_saturated(klee_i)
                     
                     kill(proc.pid, signal.SIGINT)
-                    time.sleep(5) # Might take a long time for KLEE to be killed properly
+                    time.sleep(10) # Might take a long time for KLEE to be killed properly
                     klee_i += 1
 
     def __init__(self, 
@@ -478,6 +498,17 @@ class Jolf:
         self.coverage_source = coverage_source
         self.coverage_executable = coverage_executable
         self.size_batch = size_batch
+
+        log_line = "Jolf object created\n"
+        log_line += "\tMax time: %s\n"%(self.max_time_each)
+        log_line += "\tKLEE Object: %s\n"%(self.klee_object)
+        log_line += "\tAFL Object: %s\n"%(self.afl_object)
+        if self.size_batch:
+            log_line += "\tUsing size-wise file batching for KLEE runs"
+        else:
+            log_line += "\tNOT grouping files by size. Feeding everything to KLEE at once"
+
+        self.LOG(log_line)
 
         self.afl_progress = {}
         self.klee_progress = {}
