@@ -8,8 +8,6 @@ import subprocess
 from collections import OrderedDict
 
 class Jolf:
-    PREFIXES = ["/home/ognawala/coreutils-8.30/", "/home/ognawala/coreutils-8.30-gcov/"]
-
     def LOG(self, line):
         log_file = open(os.path.join(self.all_output_dir, "jolf.log"), "a+")
         log_file.write("%s: %s\n"%(time.ctime(None), line))
@@ -118,11 +116,11 @@ class Jolf:
             if line.startswith("#"):
                 continue
             fields = line.strip().split(", ")
-            if not fields[2].startswith(PREFIXES[1]):
+            if not fields[2].startswith(self.PREFIXES[1]):
                 continue
             if not fields[3]=="line":
                 continue
-            file_name = fields[2].split(PREFIXES[1])[-1]
+            file_name = fields[2].split(self.PREFIXES[1])[-1]
             line_no = int(fields[4])
 
             if (file_name, line_no) not in coverage_list:
@@ -134,9 +132,9 @@ class Jolf:
         for f in glob.glob(klee_out_dir+"/*.cov"):
             cov_file = open(f, "r")
             for line in cov_file:
-                if not line.startswith(PREFIXES[0]):
+                if not line.startswith(self.PREFIXES[0]):
                     continue
-                file_name = line.strip().split(":")[0].split(PREFIXES[0])[-1]
+                file_name = line.strip().split(":")[0].split(self.PREFIXES[0])[-1]
                 line_no = int(line.strip().split(":")[-1])
                 if (file_name, line_no) not in coverage_list:
                     coverage_list.append((file_name, line_no))
@@ -175,8 +173,9 @@ class Jolf:
 
     def dispatch(self):
         seed_inputs_dir = self.prepare_directory()
-        self.check_klee()
-        self.check_afl()
+        if self.mode != "coverage":
+            self.check_klee()
+            self.check_afl()
         
         log_line = "Jolf dispatching\n"
         log_line += "\tMax time: %s\n"%(self.max_time_each)
@@ -196,27 +195,28 @@ class Jolf:
         self.LOG("Dispatch method returned")
         self.LOG("Exiting Jolf..")
 
-    def call_afl_cov(self, coverage_executable, afl_command_args, coverage_source):
-        os.system("afl-cov -d %s --coverage-cmd \"%s %s AFL_FILE\" --code-dir %s --coverage-include-lines"%(d, coverage_executable, afl_command_args, coverage_source))
+    def call_afl_cov(self, afl_output_dir, coverage_executable, afl_command_args, coverage_source, live=False):
+        if live:
+            live_arg = "--live --background --sleep 2"
+        else:
+            live_arg = ""
+        os.system("afl-cov -d %s %s --coverage-cmd \"%s %s AFL_FILE\" --code-dir %s --coverage-include-lines"%(afl_output_dir, live_arg, coverage_executable, afl_command_args, coverage_source))
 
-    def _dispatch_coverage(self):
+    def _dispatch_coverage(self, seed_inputs_dir):
         print("Calculating coverage...")
-        fuzzing_dirs = glob.glob(all_output_dir+"/fuzzing-*") + [all_output_dir+"/init-fuzzing/"]
+        # fuzzing_dirs = glob.glob(self.all_output_dir+"/fuzzing-*")
         
-        for d in fuzzing_dirs:
-            if os.path.isdir(d+"/cov"):
-                continue
-            afl_command_args = get_afl_command_args(d)
-            self.call_afl_cov(self.coverage_executable, afl_command_args, self.coverage_source)
-
         coverage_list = []
-        
-        coverage_list = get_klee_coverage(coverage_list, all_output_dir+"/klee0")
-        
-        for d in fuzzing_dirs:
+        for d in glob.glob(self.all_output_dir+"/fuzzing-*"):
+            print("Processing AFL output dir: %s"%(d))
+            if not os.path.isdir(d+"/cov"):
+                afl_command_args = self.get_afl_command_args(d)
+                self.call_afl_cov(d, self.coverage_executable, afl_command_args, self.coverage_source)
             coverage_list = self.get_afl_coverage(coverage_list, d)
 
-        coverage_list = self.get_klee_coverage(coverage_list, self.all_output_dir+"/klee1")
+        for d in glob.glob(self.all_output_dir + "/klee-*"):
+            print("Processing KLEE output dir: %s"%(d))
+            coverage_list = self.get_klee_coverage(coverage_list, d)
 
         print("Covered lines: %d"%(len(coverage_list)))
 
@@ -409,22 +409,6 @@ class Jolf:
         
         while (not os.path.exists(os.path.join(os.path.join(self.all_output_dir, "klee-"+str(i)), "run.istats"))): # Klee should have at least done something 
             continue
-        """
-        new_covered = []
-        for f in glob.glob(os.path.join(self.all_output_dir, "klee-"+str(i))+"/test*.cov"):
-            if f in self.klee_progress.keys():
-                continue
-            print("Got new progress: %s"%(f))
-            self.klee_progress[f] = self.parse_klee_cov(f)
-            if self.klee_progress[f]:
-                new_covered.append(f)
-
-        if not new_covered==[]:
-            print("Continuing KLEE...")
-            return False
-
-        print("Halting KLEE. No progress for a long time.")
-        """
         len_old_covered = len([len(self.klee_progress[k].keys()) for k in self.klee_progress.keys()])
         new_covered = {}
 
@@ -454,8 +438,6 @@ class Jolf:
             print(argv)
             time.sleep(2)
             
-            #sys.exit(-1)
-
             # How many sets of command line arguments were found by KLEE?
             if len(argv)==0:
                 argv = [" "]
@@ -512,13 +494,7 @@ class Jolf:
             coverage_executable,
             size_batch):
         
-        if mode=="timed":
-            self.dispatch_method = self._dispatch_timed
-        elif mode=="coverage":
-            self.dispatch_method = self._dispatch_coverage
-        elif mode=="saturation":
-            self.dispatch_method = self._dispatch_saturation
-        
+        self.mode = mode 
         self.max_time_each = max_time_each
         self.afl_seed_inputs_dir = afl_seed_inputs_dir
         self.all_output_dir = all_output_dir
@@ -535,3 +511,12 @@ class Jolf:
         os.system("rm -rf /tmp/klee-out")
         os.system("rm -rf /tmp/afl-out")
         
+        if self.mode=="timed":
+            self.dispatch_method = self._dispatch_timed
+        elif self.mode=="coverage":
+            self.dispatch_method = self._dispatch_coverage
+        elif self.mode=="saturation":
+            self.dispatch_method = self._dispatch_saturation
+        
+        self.PREFIXES = ["/home/ognawala/coreutils-8.30/", "/home/ognawala/coreutils-8.30-gcov/"]
+
