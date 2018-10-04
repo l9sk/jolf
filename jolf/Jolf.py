@@ -13,6 +13,17 @@ class Jolf:
         log_file.write("%s: %s\n"%(time.ctime(None), line))
         log_file.close()
         
+    def write_coverage(self):
+        sorted_keys = sorted(self.coverage_list.keys())
+        coverage_file = open(os.path.join(self.all_output_dir, "coverage.log"), "a+")
+        for s in sorted_keys:
+            if s in self.written_coverage:
+                continue
+            for tup in self.coverage_list[s]:
+                coverage_file.write("%s: %s %d\n"%(time.ctime(s), tup[0], tup[1]))
+            self.written_coverage.append(s)
+        coverage_file.close()
+
     def call_afl(self, max_time, seed_inputs_dir, output_dir, afl_object, argv):
         self.LOG("Calling AFL")
         self.LOG("\tMax-time: %d, output-dir: %s, argv: %s"%(max_time, output_dir, argv))
@@ -109,9 +120,13 @@ class Jolf:
 
         return command_args
 
-    def get_afl_coverage(self, coverage_list, afl_out_dir):
+    def get_afl_coverage(self, afl_out_dir):
+        if not os.path.exists(os.path.join(afl_out_dir, "cov/id-delta-cov")):
+            return []
+
         coverage_file = open(os.path.join(afl_out_dir, "cov/id-delta-cov"), "r")
-        
+        new_covered = []
+
         for line in coverage_file:
             if line.startswith("#"):
                 continue
@@ -123,12 +138,14 @@ class Jolf:
             file_name = fields[2].split(self.PREFIXES[1])[-1]
             line_no = int(fields[4])
 
-            if (file_name, line_no) not in coverage_list:
-                coverage_list.append((file_name, line_no))
+            if not(any([ (file_name, line_no) in v for v in self.coverage_list.values() ])):
+                new_covered.append((file_name, line_no)) 
 
-        return coverage_list
+        return new_covered
 
-    def get_klee_coverage(self, coverage_list, klee_out_dir):
+    def get_klee_coverage(self, klee_out_dir):
+        new_covered = []
+
         for f in glob.glob(klee_out_dir+"/*.cov"):
             cov_file = open(f, "r")
             for line in cov_file:
@@ -136,10 +153,10 @@ class Jolf:
                     continue
                 file_name = line.strip().split(":")[0].split(self.PREFIXES[0])[-1]
                 line_no = int(line.strip().split(":")[-1])
-                if (file_name, line_no) not in coverage_list:
-                    coverage_list.append((file_name, line_no))
+                if not(any([ (file_name, line_no) in v for v in self.coverage_list.values() ])):
+                    new_covered.append((file_name, line_no)) 
 
-        return coverage_list
+        return new_covered
 
     def sort_inputs_by_size(self, input_dirs):
         size_dict = {}
@@ -165,6 +182,8 @@ class Jolf:
         time.sleep(5)
 
     def check_afl(self):
+        if not os.path.isdir("/tmp/afl-out"):
+            os.system("mkdir /tmp/afl-out")
         self.call_afl(5, self.afl_seed_inputs_dir, "/tmp/afl-out", self.afl_object, "")
         print("Checking if AFL works with the object")
         print("You have 5 seconds to hit Ctrl+C")
@@ -197,7 +216,7 @@ class Jolf:
 
     def call_afl_cov(self, afl_output_dir, coverage_executable, afl_command_args, coverage_source, live=False):
         if live:
-            live_arg = "--live --background --sleep 2"
+            live_arg = "--live --background --quiet --sleep 5"
         else:
             live_arg = ""
         os.system("afl-cov -d %s %s --coverage-cmd \"%s %s AFL_FILE\" --code-dir %s --coverage-include-lines"%(afl_output_dir, live_arg, coverage_executable, afl_command_args, coverage_source))
@@ -206,19 +225,27 @@ class Jolf:
         print("Calculating coverage...")
         # fuzzing_dirs = glob.glob(self.all_output_dir+"/fuzzing-*")
         
-        coverage_list = []
         for d in glob.glob(self.all_output_dir+"/fuzzing-*"):
             print("Processing AFL output dir: %s"%(d))
             if not os.path.isdir(d+"/cov"):
                 afl_command_args = self.get_afl_command_args(d)
                 self.call_afl_cov(d, self.coverage_executable, afl_command_args, self.coverage_source)
-            coverage_list = self.get_afl_coverage(coverage_list, d)
+            new_covered = self.get_afl_coverage(d)
+            if new_covered:
+                key = time.time()
+                print(key)
+                self.coverage_list[key] = new_covered
 
         for d in glob.glob(self.all_output_dir + "/klee-*"):
             print("Processing KLEE output dir: %s"%(d))
-            coverage_list = self.get_klee_coverage(coverage_list, d)
+            new_covered = self.get_klee_coverage(d)
+            if new_covered:
+                key = time.time()
+                print(key)
+                self.coverage_list[key] = new_covered
 
-        print("Covered lines: %d"%(len(coverage_list)))
+        #print("Covered lines: %d"%(len(covered)))
+        print(self.coverage_list)
 
         return 0
 
@@ -424,8 +451,8 @@ class Jolf:
 
     def _dispatch_saturation(self, seed_inputs_dir):
         self.start_time = time.time()
-        fuzzing_i = 1
-        klee_i = 1
+        self.fuzzing_i = 1
+        self.klee_i = 1
         
         while(time.time()-self.start_time < int(self.max_time_each)):
             fuzzing_i = len(glob.glob(self.all_output_dir+"/fuzzing-*")) + 1
@@ -444,14 +471,25 @@ class Jolf:
             
             for i, arg in enumerate(argv):
                 if not os.path.isdir(os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i))):
+                    # Call AFL
                     proc = self.call_afl(0, seed_inputs_dir, os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i)), self.afl_object, arg)
+                    time.sleep(5)
+                    # Call afl-cov on the side
+                    self.call_afl_cov(os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i)), self.coverage_executable, arg, self.coverage_source, True)
+                    
                     afl_saturate = False
                     while (not afl_saturate):
-                        time.sleep(6) # 1 second more than how often plot_data is updated 
                         afl_saturate = self.afl_saturated(fuzzing_i)
+                        new_covered = self.get_afl_coverage(os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i)))
+                        self.coverage_list[time.time()] = new_covered
+                        self.write_coverage()
+                        time.sleep(5) # 1 second more than how often plot_data is updated 
 
                     kill(proc.pid, signal.SIGINT)
                     time.sleep(3) # Wait for AFL to exit
+                    new_covered = self.get_afl_coverage(os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i)))
+                    self.coverage_list[time.time()] = new_covered
+                    self.write_coverage()
                     fuzzing_i += 1
             
             # Sort afl test-cases by size
@@ -475,12 +513,17 @@ class Jolf:
 
                     klee_saturate = False
                     while (not klee_saturate):
-                        seed_inputs = len(os.listdir("/tmp/afl-seed-group/"))
+                        new_covered = self.get_klee_coverage(os.path.join(self.all_output_dir, "klee-"+str(klee_i)))
+                        self.coverage_list[time.time()] = new_covered
+                        self.write_coverage()
                         time.sleep(5) # Takes a lot of time for KLEE to generate anything meaningful
                         klee_saturate = self.klee_saturated(klee_i)
                     
                     kill(proc.pid, signal.SIGINT)
                     time.sleep(10) # Might take a long time for KLEE to be killed properly
+                    new_covered = self.get_klee_coverage(os.path.join(self.all_output_dir, "klee-"+str(klee_i)))
+                    self.coverage_list[time.time()] = new_covered
+                    self.write_coverage()
                     klee_i += 1
 
     def __init__(self, 
@@ -505,8 +548,11 @@ class Jolf:
         self.size_batch = size_batch
 
 
-        self.afl_progress = {}
-        self.klee_progress = {}
+        self.afl_progress = {} # Used to store values from plot_data and to determine if AFL has saturated
+        self.klee_progress = {} # Used to store values from run.istats and to determine if KLEE has saturated
+        self.coverage_list = {}
+        self.written_coverage = []
+
         self.start_time = 0
         os.system("rm -rf /tmp/klee-out")
         os.system("rm -rf /tmp/afl-out")
