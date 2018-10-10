@@ -37,7 +37,10 @@ class Jolf:
             for f in glob.glob(os.path.join(d, "queue") + "/id*"):
                 if os.path.getsize(f)>max_size:
                     max_size = os.path.getsize(f)
-        return max_size
+        if max_size==0:
+            return 10 # Default non-zero size file
+        else:
+            return max_size
 
     def call_klee(self, output_dir, max_time, klee_object, afl_seed_out_dirs):
         self.LOG("Calling KLEE")
@@ -62,7 +65,7 @@ class Jolf:
             timeout = []
 
         other_args = ["-only-output-states-covering-new", "-max-instruction-time=10", "-optimize", "-suppress-external-warnings", "-write-cov", "-istats-write-interval=1"]
-        sym_args = ["A", "--sym-args", "1", "2", "3", "--sym-files", "1", str(sym_file_size)]
+        sym_args = ["--sym-args", "0", "2", "3", "A", "--sym-files", "1", str(sym_file_size)]
 
         try:
             ret = subprocess.Popen(klee_command + seeding_from_afl + libc + output + timeout + other_args + [klee_object] + sym_args)
