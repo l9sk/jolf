@@ -6,6 +6,7 @@ from os import kill
 from config import AFL_FUZZ, KLEE
 import subprocess
 from collections import OrderedDict
+import tempfile, shutil
 
 class Jolf:
     def LOG(self, line):
@@ -73,8 +74,8 @@ class Jolf:
         else:
             timeout = []
 
-        other_args = ["-only-output-states-covering-new", "-max-instruction-time=10", "-optimize", "-suppress-external-warnings", "-write-cov", "-istats-write-interval=1"]
-        sym_args = ["--sym-args", "0", "2", "3", "A", "--sym-files", "1", str(sym_file_size)]
+        other_args = ["-only-output-states-covering-new", "-max-instruction-time=10", "-suppress-external-warnings", "-write-cov", "-istats-write-interval=1"]
+        sym_args = ["--sym-args", "1", "3", "3", "--sym-files", "1", str(sym_file_size)]
 
         try:
             ret = subprocess.Popen(klee_command + seeding_from_afl + libc + output + timeout + other_args + [klee_object] + sym_args)
@@ -179,19 +180,24 @@ class Jolf:
         return size_dict
 
     def check_klee(self):
-        self.call_klee("/tmp/klee-out", 5, self.klee_object, [])
+        while True:
+            tmp_klee_dir_name = os.path.join("/tmp/", "klee-out-"+next(tempfile._get_candidate_names()))
+            if not os.path.isdir(tmp_klee_dir_name):
+                break
+
+        self.call_klee(tmp_klee_dir_name, 5, self.klee_object, [])
         print("Checking if KLEE works with the object")
         print("You have 5 seconds to hit Ctrl+C")
         time.sleep(5)
+        shutil.rmtree(tmp_klee_dir_name)
 
     def check_afl(self):
-        if not os.path.isdir("/tmp/afl-out"):
-            os.system("mkdir /tmp/afl-out")
-        self.call_afl(5, self.afl_seed_inputs_dir, "/tmp/afl-out", self.afl_object, "")
+        tmp_afl_dir = tempfile.mkdtemp(prefix="afl-out-")
+        self.call_afl(5, self.afl_seed_inputs_dir, tmp_afl_dir, self.afl_object, "")
         print("Checking if AFL works with the object")
         print("You have 5 seconds to hit Ctrl+C")
         time.sleep(5)
-        os.system("rm -rf /tmp/afl-out")
+        shutil.rmtree(tmp_afl_dir)
 
     def dispatch(self):
         seed_inputs_dir = self.prepare_directory()
@@ -218,11 +224,19 @@ class Jolf:
         self.LOG("Exiting Jolf..")
 
     def call_afl_cov(self, afl_output_dir, coverage_executable, afl_command_args, coverage_source, live=False):
+        self.LOG("Attempting to call afl-cov: %s %s %s"%(afl_output_dir, coverage_executable, coverage_source))
         if live:
-            live_arg = "--live --background --quiet --sleep 5"
+            live_arg = "--live --background --quiet --sleep 2"
         else:
             live_arg = ""
-        os.system("afl-cov -d %s %s --coverage-cmd \"%s %s AFL_FILE\" --code-dir %s --coverage-include-lines"%(afl_output_dir, live_arg, coverage_executable, afl_command_args, coverage_source))
+        ret = os.system("afl-cov -d %s %s --coverage-cmd \"%s %s AFL_FILE\" --code-dir %s --coverage-include-lines >> %s 2>&1"%(afl_output_dir, live_arg, coverage_executable, afl_command_args, coverage_source, os.path.join(self.all_output_dir, "afl-cov.out")))
+
+        if ret==0:
+            self.LOG("Dispatching afl-cov was successful\n\t%s"%(afl_output_dir))
+        else:
+            self.LOG("FAILED to dispatch afl-cov\n\treturn value: %d"%(ret))
+        
+        return ret
 
     def _dispatch_coverage(self, seed_inputs_dir):
         print("Calculating coverage...")
@@ -283,14 +297,18 @@ class Jolf:
         
         for i, s in enumerate(file_size_dict.keys()):
             if not os.path.isdir(os.path.join(self.all_output_dir, "klee"+str(i))):
+                tmp_afl_seed_group_dir = tempfile.mkdtemp(prefix="afl-seed-group-")
+                """
                 if os.path.isdir("/tmp/afl-seed-group"):
                     os.system("rm -rf /tmp/afl-seed-group")
                 os.system("mkdir /tmp/afl-seed-group")
-                os.system("mkdir /tmp/afl-seed-group/queue")
+                """
+                os.system("mkdir %s/queue"%(tmp_afl_seed_group_dir))
                 for f in file_size_dict[s]:
-                    os.system("cp %s /tmp/afl-seed-group/queue/"%(f))
+                    os.system("cp %s %s/queue/"%(f, tmp_afl_seed_group_dir))
                 
-                self.call_klee(os.path.join(self.all_output_dir, "klee"+str(i)), max_time_klee_instance, self.klee_object, ["/tmp/afl-seed-group"])
+                self.call_klee(os.path.join(self.all_output_dir, "klee"+str(i)), max_time_klee_instance, self.klee_object, [tmp_afl_seed_group_dir])
+                shutil.rmtree(tmp_afl_seed_group_dir)
 
         # Read KLEE testcases and populate new seed-inputs folder
         argv = []
@@ -335,15 +353,19 @@ class Jolf:
         # Concolic execution again
         for i, s in enumerate(file_size_dict.keys()):
             if not os.path.isdir(os.path.join(self.all_output_dir, "klee-2-"+str(i))):
+                tmp_afl_seed_group_dir = tempfile.mkdtemp(prefix="afl-seed-group-")
+                """
                 if os.path.isdir("/tmp/afl-seed-group"):
                     os.system("rm -rf /tmp/afl-seed-group")
                 os.system("mkdir /tmp/afl-seed-group")
-                os.system("mkdir /tmp/afl-seed-group/queue")
+                """
+                os.system("mkdir %s/queue"%(tmp_afl_seed_group_dir))
                 for f in file_size_dict[s]:
-                    os.system("cp %s /tmp/afl-seed-group/queue/"%(f))
+                    os.system("cp %s %s/queue/"%(f, tmp_afl_seed_group_dir))
                 
-                afl_seed_out_dirs = "/tmp/afl-seed-group/"
+                afl_seed_out_dirs = tmp_afl_seed_group_dir
                 self.call_klee(os.path.join(self.all_output_dir, "klee-2-"+str(i)), self.max_time_klee_instance, self.klee_object, [afl_seed_out_dirs])
+                shutil.rmtree(tmp_afl_seed_group_dir)
 
     def parse_plot_data_line(self, line):
         if line.startswith("#"):
@@ -442,14 +464,16 @@ class Jolf:
         len_old_covered = len([len(self.klee_progress[k].keys()) for k in self.klee_progress.keys()])
         new_covered = {}
 
-        os.system("cp " + os.path.join(os.path.join(self.all_output_dir, "klee-"+str(i)), "run.istats") + " /tmp/run.istats")
-        new_covered = self.parse_run_istats("/tmp/run.istats")
+        tmp_istats_dir = tempfile.mkdtemp()
+        os.system("cp " + os.path.join(os.path.join(self.all_output_dir, "klee-"+str(i)), "run.istats") + " " + tmp_istats_dir)
+        new_covered = self.parse_run_istats(os.path.join(tmp_istats_dir, "run.istats"))
         if new_covered:
             len_new_covered = len([len(self.klee_progress[k].keys()) for k in self.klee_progress.keys()])
             self.LOG("Continuing KLEE. Line coverage increased from %d to %d"%(len_old_covered, len_new_covered))
             return False
 
         self.LOG("KLEE saturated. No new line-coverage found")
+        shutil.rmtree(tmp_istats_dir)
         return True
 
     def _dispatch_saturation(self, seed_inputs_dir):
@@ -473,7 +497,7 @@ class Jolf:
                 argv = [" "]
             
             for i, arg in enumerate(argv):
-                if not os.path.isdir(os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i))):
+                if not (os.path.isdir(os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i))) or time.time()-self.start_time>int(self.max_time_each)):
                     # Call AFL
                     proc = self.call_afl(0, seed_inputs_dir, os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i)), self.afl_object, arg)
                     time.sleep(5)
@@ -501,16 +525,19 @@ class Jolf:
             
             klee_i = len(glob.glob(self.all_output_dir+"/klee-*")) + 1
             for i, s in enumerate(file_size_dict.keys()):
-                if not os.path.isdir(os.path.join(self.all_output_dir, "klee-"+str(klee_i))):
+                if not (os.path.isdir(os.path.join(self.all_output_dir, "klee-"+str(klee_i))) or time.time()-self.start_time>int(self.max_time_each)):
+                    tmp_afl_seed_group_dir = tempfile.mkdtemp(prefix="afl-seed-group-")
+                    """
                     if os.path.isdir("/tmp/afl-seed-group"):
                         os.system("rm -rf /tmp/afl-seed-group")
                     os.system("mkdir /tmp/afl-seed-group")
-                    os.system("mkdir /tmp/afl-seed-group/queue")
+                    """
+                    os.system("mkdir %s/queue"%(tmp_afl_seed_group_dir))
                     for f in file_size_dict[s]:
-                        os.system("cp %s /tmp/afl-seed-group/queue/"%(f))
+                        os.system("cp %s %s/queue/"%(f, tmp_afl_seed_group_dir))
                     
-                    proc = self.call_klee(os.path.join(self.all_output_dir, "klee-"+str(klee_i)), 0, self.klee_object, ["/tmp/afl-seed-group"])
-                    seed_inputs = len(os.listdir("/tmp/afl-seed-group/queue/"))
+                    proc = self.call_klee(os.path.join(self.all_output_dir, "klee-"+str(klee_i)), 0, self.klee_object, [tmp_afl_seed_group_dir])
+                    seed_inputs = len(os.listdir("%s/queue/"%(tmp_afl_seed_group_dir)))
                     self.LOG("Giving %d seconds to KLEE for seeding"%(5*seed_inputs))
                     time.sleep(5*seed_inputs) # Give KLEE some seeding time 
 
@@ -524,6 +551,7 @@ class Jolf:
                     
                     kill(proc.pid, signal.SIGINT)
                     time.sleep(10) # Might take a long time for KLEE to be killed properly
+                    shutil.rmtree(tmp_afl_seed_group_dir)
                     new_covered = self.get_klee_coverage(os.path.join(self.all_output_dir, "klee-"+str(klee_i)))
                     self.coverage_list[time.time()] = new_covered
                     self.write_coverage()
@@ -557,8 +585,10 @@ class Jolf:
         self.written_coverage = []
 
         self.start_time = 0
+        """
         os.system("rm -rf /tmp/klee-out")
         os.system("rm -rf /tmp/afl-out")
+        """
         
         if self.mode=="timed":
             self.dispatch_method = self._dispatch_timed
