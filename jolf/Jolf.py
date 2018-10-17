@@ -3,7 +3,7 @@ from read_klee_testcases import process_klee_out
 #from read_afl_testcases import main as rat_main
 import os, sys, time, glob, signal, json
 from os import kill
-from config import AFL_FUZZ, KLEE
+from config import AFL_FUZZ, KLEE, PREFIXES
 import subprocess
 from collections import OrderedDict
 import tempfile, shutil
@@ -21,7 +21,7 @@ class Jolf:
             if s in self.written_coverage:
                 continue
             for tup in self.coverage_list[s]:
-                coverage_file.write("%s: %s %d\n"%(time.ctime(s), tup[0], tup[1]))
+                coverage_file.write("%s: %s: %s %d\n"%(time.ctime(s), tup[0], tup[1], tup[2]))
             self.written_coverage.append(s)
         coverage_file.close()
 
@@ -135,15 +135,18 @@ class Jolf:
             if line.startswith("#"):
                 continue
             fields = line.strip().split(", ")
+            """
             if not fields[2].startswith(self.PREFIXES[1]):
                 continue
+            """
             if not fields[3]=="line":
                 continue
-            file_name = fields[2].split(self.PREFIXES[1])[-1]
+            #file_name = fields[2].split(self.PREFIXES[1])[-1]
+            file_name = fields[2].strip()
             line_no = int(fields[4])
 
-            if not(any([ (file_name, line_no) in v for v in self.coverage_list.values() ])):
-                new_covered.append((file_name, line_no)) 
+            if not(any([ (("AFL", os.path.basename(file_name), line_no) in v or ("KLEE", os.path.basename(file_name), line_no) in v) for v in self.coverage_list.values() ])):
+                new_covered.append(("AFL", os.path.basename(file_name), line_no)) 
 
         return new_covered
 
@@ -153,12 +156,15 @@ class Jolf:
         for f in glob.glob(klee_out_dir+"/*.cov"):
             cov_file = open(f, "r")
             for line in cov_file:
+                """
                 if not line.startswith(self.PREFIXES[0]):
                     continue
-                file_name = line.strip().split(":")[0].split(self.PREFIXES[0])[-1]
+                """ 
+                #file_name = line.strip().split(":")[0].split(self.PREFIXES[0])[-1]
+                file_name = line.strip().split(":")[0].strip()
                 line_no = int(line.strip().split(":")[-1])
-                if not(any([ (file_name, line_no) in v for v in self.coverage_list.values() ])):
-                    new_covered.append((file_name, line_no)) 
+                if not(any([ (("AFL", os.path.basename(file_name), line_no) in v or ("KLEE", os.path.basename(file_name), line_no) in v) for v in self.coverage_list.values() ])):
+                    new_covered.append(("KLEE", os.path.basename(file_name), line_no)) 
 
         return new_covered
 
@@ -386,7 +392,6 @@ class Jolf:
         if (time.time() - self.start_time) > int(self.max_time_each):
             self.LOG("AFL saturated because of timeout.")
             return True
-
         while (not os.path.exists(os.path.join(os.path.join(self.all_output_dir, "fuzzing-"+str(i), "plot_data")))):
             continue
         
@@ -505,7 +510,7 @@ class Jolf:
                     self.call_afl_cov(os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i)), self.coverage_executable, arg, self.coverage_source, True)
                     
                     afl_saturate = False
-                    while (not afl_saturate):
+                    while not afl_saturate:
                         afl_saturate = self.afl_saturated(fuzzing_i)
                         new_covered = self.get_afl_coverage(os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i)))
                         self.coverage_list[time.time()] = new_covered
@@ -542,7 +547,7 @@ class Jolf:
                     time.sleep(5*seed_inputs) # Give KLEE some seeding time 
 
                     klee_saturate = False
-                    while (not klee_saturate):
+                    while not klee_saturate:
                         new_covered = self.get_klee_coverage(os.path.join(self.all_output_dir, "klee-"+str(klee_i)))
                         self.coverage_list[time.time()] = new_covered
                         self.write_coverage()
@@ -597,5 +602,4 @@ class Jolf:
         elif self.mode=="saturation":
             self.dispatch_method = self._dispatch_saturation
         
-        self.PREFIXES = ["/home/ognawala/coreutils-8.30/", "/home/ognawala/coreutils-8.30-gcov/"]
-
+        self.PREFIXES = PREFIXES
