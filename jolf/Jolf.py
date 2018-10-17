@@ -284,95 +284,86 @@ class Jolf:
         return seed_inputs_dir
 
     def _dispatch_timed(self, seed_inputs_dir):
-        # First fuzz
-        if not os.path.isdir(os.path.join(self.all_output_dir, "init-fuzzing")):
-            self.call_afl(self.max_time_each, seed_inputs_dir, os.path.join(self.all_output_dir, "init-fuzzing"), self.afl_object, "")
+        self.start_time = time.time()
+        
+        time_each_round = int(self.max_time_each)/4
 
-        # Sort fuzzing test-cases by size
-        file_size_dict = self.sort_inputs_by_size([os.path.join(os.path.join(self.all_output_dir, "init-fuzzing"), "queue")])
+        if time_each_round<30:
+            time_each_round = 30
 
-        # Concolic execution with AFL seeds - grouped by seed-input size
-        if (int(self.max_time_each)/len(file_size_dict.keys()))<30:
-            max_time_klee_instance = 30 
-        else:
-            max_time_klee_instance = int(self.max_time_each)/len(file_size_dict.keys())
-        
-        print("AFL inputs grouped into %d groups"%(len(file_size_dict.keys())))
-        print("Allocating %f seconds for each KLEE instance"%(max_time_klee_instance))
-        time.sleep(2)
-        
-        for i, s in enumerate(file_size_dict.keys()):
-            if not os.path.isdir(os.path.join(self.all_output_dir, "klee"+str(i))):
-                tmp_afl_seed_group_dir = tempfile.mkdtemp(prefix="afl-seed-group-")
-                """
-                if os.path.isdir("/tmp/afl-seed-group"):
-                    os.system("rm -rf /tmp/afl-seed-group")
-                os.system("mkdir /tmp/afl-seed-group")
-                """
-                os.system("mkdir %s/queue"%(tmp_afl_seed_group_dir))
-                for f in file_size_dict[s]:
-                    os.system("cp %s %s/queue/"%(f, tmp_afl_seed_group_dir))
-                
-                self.call_klee(os.path.join(self.all_output_dir, "klee"+str(i)), max_time_klee_instance, self.klee_object, [tmp_afl_seed_group_dir])
-                shutil.rmtree(tmp_afl_seed_group_dir)
-
-        # Read KLEE testcases and populate new seed-inputs folder
-        argv = []
-        for k in glob.glob(self.all_output_dir+"/klee*"):
-            argv.extend(process_klee_out(k, seed_inputs_dir))
-        
-        argv = self.clean_argv(argv)
-        print(argv)
-        time.sleep(3)
-        
-        #sys.exit(-1)
-
-        # How many sets of command line arguments were found by KLEE?
-        if len(argv)>0:
-            if (int(self.max_time_each)/len(argv))<30:
-                max_time_fuzzing_instance = 30 
-            else:
-                max_time_fuzzing_instance = int(self.max_time_each)/len(argv)
-        else:
-            argv = [" "]
-            max_time_fuzzing_instance = self.max_time_each
-        
-        # Second fuzzing round
-        second_round_fuzzed_list = glob.glob(self.all_output_dir+"/fuzzing-*")
-        if len(second_round_fuzzed_list)==0:
+        while time.time()-self.start_time<int(self.max_time_each):
+            # Read KLEE testcases and populate new seed-inputs folder
+            argv = []
+            for k in glob.glob(self.all_output_dir+"/klee-*"):
+                argv.extend(process_klee_out(k, seed_inputs_dir))
+            
+            argv = self.clean_argv(argv)
+            
+            # How many sets of command line arguments were found by KLEE?
+            if len(argv)==0:
+                argv = [" "]
+            
+            afl_time_each_round = time_each_round/len(argv)
+            if afl_time_each_round<30:
+                afl_time_each_round = 30
+            
+            # First fuzz
             for i, arg in enumerate(argv):
-                self.call_afl(max_time_fuzzing_instance, seed_inputs_dir, os.path.join(self.all_output_dir, "fuzzing-"+str(i)), self.afl_object, arg)
-        
-        # Sort fuzzing test-cases by size
-        file_size_dict = self.sort_inputs_by_size(glob.glob(self.all_output_dir+"/fuzzing-*/queue"))
+                fuzzing_i = len(glob.glob(self.all_output_dir+"/fuzzing-*")) + 1
+                current_round_start = time.time()
+                if not (os.path.isdir(os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i))) or time.time()-self.start_time>int(self.max_time_each)):
+                    proc = self.call_afl(0, seed_inputs_dir, os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i)), self.afl_object, arg)
+                    self.call_afl_cov(os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i)), self.coverage_executable, arg, self.coverage_source, True)
+                    
+                    # Keep writing coverage every five seconds
+                    while time.time()-current_round_start<afl_time_each_round:
+                        new_covered = self.get_afl_coverage(os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i)))
+                        self.coverage_list[time.time()] = new_covered
+                        self.write_coverage()
+                        time.sleep(5) # 1 second more than how often plot_data is updated 
+                    
+                    kill(proc.pid, signal.SIGINT)
+                    time.sleep(3) # Wait for AFL to exit
+                    new_covered = self.get_afl_coverage(os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i)))
+                    self.coverage_list[time.time()] = new_covered
+                    self.write_coverage()
+                    
+            # Sort fuzzing test-cases by size
+            file_size_dict = self.sort_inputs_by_size(glob.glob(self.all_output_dir+"/fuzzing-*/queue"))
+            self.LOG("AFL inputs grouped into %d groups"%(len(file_size_dict.keys())))
 
-        # Concolic execution with AFL seeds - grouped by seed-input size
-        if (int(self.max_time_each)/len(file_size_dict.keys()))<30:
-            max_time_klee_instance = 30 
-        else:
-            max_time_klee_instance = int(self.max_time_each)/len(file_size_dict.keys())
-        
-        print("AFL inputs grouped into %d groups"%(len(file_size_dict.keys())))
-        print("Allocating %f seconds for each KLEE instance"%(max_time_klee_instance))
-        time.sleep(2)
-        
-        # Concolic execution again
-        for i, s in enumerate(file_size_dict.keys()):
-            if not os.path.isdir(os.path.join(self.all_output_dir, "klee-2-"+str(i))):
-                tmp_afl_seed_group_dir = tempfile.mkdtemp(prefix="afl-seed-group-")
-                """
-                if os.path.isdir("/tmp/afl-seed-group"):
-                    os.system("rm -rf /tmp/afl-seed-group")
-                os.system("mkdir /tmp/afl-seed-group")
-                """
-                os.system("mkdir %s/queue"%(tmp_afl_seed_group_dir))
-                for f in file_size_dict[s]:
-                    os.system("cp %s %s/queue/"%(f, tmp_afl_seed_group_dir))
-                
-                afl_seed_out_dirs = tmp_afl_seed_group_dir
-                self.call_klee(os.path.join(self.all_output_dir, "klee-2-"+str(i)), self.max_time_klee_instance, self.klee_object, [afl_seed_out_dirs])
-                shutil.rmtree(tmp_afl_seed_group_dir)
+            klee_time_each_round = time_each_round/len(file_size_dict.keys())
+            if klee_time_each_round<30:
+                klee_time_each_round = 30
 
+            # Concolic execution with AFL seeds - grouped by seed-input size
+            for i, s in enumerate(file_size_dict.keys()):
+                klee_i = len(glob.glob(self.all_output_dir+"/klee-*")) + 1
+                current_round_start = time.time()
+                if not (os.path.isdir(os.path.join(self.all_output_dir, "klee-"+str(klee_i))) or time.time()-self.start_time>int(self.max_time_each)):
+                    tmp_afl_seed_group_dir = tempfile.mkdtemp(prefix="afl-seed-group-")
+                    os.system("mkdir %s/queue"%(tmp_afl_seed_group_dir))
+                    for f in file_size_dict[s]:
+                        os.system("cp %s %s/queue/"%(f, tmp_afl_seed_group_dir))
+                    
+                    proc = self.call_klee(os.path.join(self.all_output_dir, "klee-"+str(klee_i)), 0, self.klee_object, [tmp_afl_seed_group_dir])
+                    seed_inputs = len(os.listdir("%s/queue/"%(tmp_afl_seed_group_dir)))
+                    self.LOG("Giving %d seconds to KLEE for seeding"%(5*seed_inputs))
+                    time.sleep(5*seed_inputs) # Give KLEE some seeding time 
+
+                    while time.time()-current_round_start<klee_time_each_round:
+                        new_covered = self.get_klee_coverage(os.path.join(self.all_output_dir, "klee-"+str(klee_i)))
+                        self.coverage_list[time.time()] = new_covered
+                        self.write_coverage()
+                        time.sleep(5) # Takes a lot of time for KLEE to generate anything meaningful
+                    
+                    kill(proc.pid, signal.SIGINT)
+                    time.sleep(10) # Might take a long time for KLEE to be killed properly
+                    shutil.rmtree(tmp_afl_seed_group_dir)
+                    new_covered = self.get_klee_coverage(os.path.join(self.all_output_dir, "klee-"+str(klee_i)))
+                    self.coverage_list[time.time()] = new_covered
+                    self.write_coverage()
+        
     def parse_plot_data_line(self, line):
         if line.startswith("#"):
             return None
@@ -483,8 +474,6 @@ class Jolf:
 
     def _dispatch_saturation(self, seed_inputs_dir):
         self.start_time = time.time()
-        self.fuzzing_i = 1
-        self.klee_i = 1
         
         while(time.time()-self.start_time < int(self.max_time_each)):
             fuzzing_i = len(glob.glob(self.all_output_dir+"/fuzzing-*")) + 1
@@ -505,7 +494,6 @@ class Jolf:
                 if not (os.path.isdir(os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i))) or time.time()-self.start_time>int(self.max_time_each)):
                     # Call AFL
                     proc = self.call_afl(0, seed_inputs_dir, os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i)), self.afl_object, arg)
-                    time.sleep(5)
                     # Call afl-cov on the side
                     self.call_afl_cov(os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i)), self.coverage_executable, arg, self.coverage_source, True)
                     
@@ -522,14 +510,13 @@ class Jolf:
                     new_covered = self.get_afl_coverage(os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i)))
                     self.coverage_list[time.time()] = new_covered
                     self.write_coverage()
-                    fuzzing_i += 1
             
             # Sort afl test-cases by size
             file_size_dict = self.sort_inputs_by_size(glob.glob(self.all_output_dir+"/fuzzing-*/queue"))
             self.LOG("AFL inputs grouped into %d groups"%(len(file_size_dict.keys())))
             
-            klee_i = len(glob.glob(self.all_output_dir+"/klee-*")) + 1
             for i, s in enumerate(file_size_dict.keys()):
+                klee_i = len(glob.glob(self.all_output_dir+"/klee-*")) + 1
                 if not (os.path.isdir(os.path.join(self.all_output_dir, "klee-"+str(klee_i))) or time.time()-self.start_time>int(self.max_time_each)):
                     tmp_afl_seed_group_dir = tempfile.mkdtemp(prefix="afl-seed-group-")
                     """
@@ -560,7 +547,6 @@ class Jolf:
                     new_covered = self.get_klee_coverage(os.path.join(self.all_output_dir, "klee-"+str(klee_i)))
                     self.coverage_list[time.time()] = new_covered
                     self.write_coverage()
-                    klee_i += 1
 
     def __init__(self, 
             mode, 
