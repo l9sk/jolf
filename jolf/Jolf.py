@@ -538,7 +538,7 @@ class Jolf:
                         new_covered = self.get_klee_coverage(os.path.join(self.all_output_dir, "klee-"+str(klee_i)))
                         self.coverage_list[time.time()] = new_covered
                         self.write_coverage()
-                        time.sleep(5) # Takes a lot of time for KLEE to generate anything meaningful
+                        time.sleep(12) # Takes a lot of time for KLEE to generate anything meaningful. Also AFL waits for two 5 sec cycles. 
                         klee_saturate = self.klee_saturated(klee_i)
                     
                     kill(proc.pid, signal.SIGINT)
