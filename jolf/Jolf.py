@@ -9,6 +9,24 @@ from collections import OrderedDict
 import tempfile, shutil
 
 class Jolf:
+    def LOG_AFL_PROGRESS(self):
+        log_file = open(os.path.join(self.all_output_dir, "afl-progress.log"), "a+")
+        for k in sorted(self.afl_progress.keys()):
+            log_file.write("%s: %s %s %s %s %s\n"%(str(k), str(self.afl_progress[k][0]), str(self.afl_progress[k][1]), str(self.afl_progress[k][2]), str(self.afl_progress[k][3]), str(self.afl_progress[k][4])))
+        log_file.close()
+    
+    def LOG_KLEE_PROGRESS(self):
+        log_file = open(os.path.join(self.all_output_dir, "klee-progress.log"), "a+")
+        for src in self.klee_progress.keys():
+            for llvm in self.klee_progress[src].keys():
+                log_file.write("%s %s %s\n"%(src, llvm, self.klee_progress[src][llvm]))
+        log_file.close()
+
+    def LOG_PROCESS(self, pid):
+        log_file = open(os.path.join(self.all_output_dir, "processes.log"), "a+")
+        log_file.write("%s: %s\n"%(time.ctime(None), str(pid)))
+        log_file.close()
+
     def LOG(self, line):
         log_file = open(os.path.join(self.all_output_dir, "jolf.log"), "a+")
         log_file.write("%s: %s\n"%(time.ctime(None), line))
@@ -227,6 +245,8 @@ class Jolf:
         self.dispatch_method(seed_inputs_dir)
 
         self.LOG("Dispatch method returned")
+        self.LOG_AFL_PROGRESS()
+        self.LOG_KLEE_PROGRESS()
         self.LOG("Exiting Jolf..")
 
     def call_afl_cov(self, afl_output_dir, coverage_executable, afl_command_args, coverage_source, live=False):
@@ -313,6 +333,7 @@ class Jolf:
                 current_round_start = time.time()
                 if not (os.path.isdir(os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i))) or time.time()-self.start_time>int(self.max_time_each)):
                     proc = self.call_afl(0, seed_inputs_dir, os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i)), self.afl_object, arg)
+                    self.LOG_PROCESS(proc.pid)
                     self.call_afl_cov(os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i)), self.coverage_executable, arg, self.coverage_source, True)
                     
                     # Keep writing coverage every five seconds
@@ -347,9 +368,11 @@ class Jolf:
                         os.system("cp %s %s/queue/"%(f, tmp_afl_seed_group_dir))
                     
                     proc = self.call_klee(os.path.join(self.all_output_dir, "klee-"+str(klee_i)), 0, self.klee_object, [tmp_afl_seed_group_dir])
+                    self.LOG_PROCESS(proc.pid)
                     seed_inputs = len(os.listdir("%s/queue/"%(tmp_afl_seed_group_dir)))
-                    self.LOG("Giving %d seconds to KLEE for seeding"%(5*seed_inputs))
-                    time.sleep(5*seed_inputs) # Give KLEE some seeding time 
+                    seeding_time = 5*seed_inputs if (5*seed_inputs<120) else 120 # Give KLEE some seeding time but not more than 120 sec
+                    self.LOG("Giving %d seconds to KLEE for seeding"%(seeding_time))
+                    time.sleep(seeding_time) 
 
                     while time.time()-current_round_start<klee_time_each_round:
                         new_covered = self.get_klee_coverage(os.path.join(self.all_output_dir, "klee-"+str(klee_i)))
@@ -389,7 +412,7 @@ class Jolf:
         plot_data = open(os.path.join(os.path.join(self.all_output_dir, "fuzzing-"+str(i), "plot_data")))
         
         lines = reversed(plot_data.readlines())
-        
+
         for line in lines:
             progress = self.parse_plot_data_line(line)
             if not progress: # Maybe start of the file
@@ -491,19 +514,21 @@ class Jolf:
                 argv = [" "]
             
             for i, arg in enumerate(argv):
+                fuzzing_i = len(glob.glob(self.all_output_dir+"/fuzzing-*")) + 1
                 if not (os.path.isdir(os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i))) or time.time()-self.start_time>int(self.max_time_each)):
                     # Call AFL
                     proc = self.call_afl(0, seed_inputs_dir, os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i)), self.afl_object, arg)
+                    self.LOG_PROCESS(proc.pid)
                     # Call afl-cov on the side
                     self.call_afl_cov(os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i)), self.coverage_executable, arg, self.coverage_source, True)
                     
                     afl_saturate = False
                     while not afl_saturate:
-                        afl_saturate = self.afl_saturated(fuzzing_i)
                         new_covered = self.get_afl_coverage(os.path.join(self.all_output_dir, "fuzzing-"+str(fuzzing_i)))
                         self.coverage_list[time.time()] = new_covered
                         self.write_coverage()
-                        time.sleep(5) # 1 second more than how often plot_data is updated 
+                        time.sleep(6) # 1 second more than how often plot_data is updated 
+                        afl_saturate = self.afl_saturated(fuzzing_i)
 
                     kill(proc.pid, signal.SIGINT)
                     time.sleep(3) # Wait for AFL to exit
@@ -529,9 +554,11 @@ class Jolf:
                         os.system("cp %s %s/queue/"%(f, tmp_afl_seed_group_dir))
                     
                     proc = self.call_klee(os.path.join(self.all_output_dir, "klee-"+str(klee_i)), 0, self.klee_object, [tmp_afl_seed_group_dir])
+                    self.LOG_PROCESS(proc.pid)
                     seed_inputs = len(os.listdir("%s/queue/"%(tmp_afl_seed_group_dir)))
-                    self.LOG("Giving %d seconds to KLEE for seeding"%(5*seed_inputs))
-                    time.sleep(5*seed_inputs) # Give KLEE some seeding time 
+                    seeding_time = 5*seed_inputs if (5*seed_inputs<120) else 120 # Give KLEE some seeding time but not more than 120 sec
+                    self.LOG("Giving %d seconds to KLEE for seeding"%(seeding_time))
+                    time.sleep(seeding_time) 
 
                     klee_saturate = False
                     while not klee_saturate:
