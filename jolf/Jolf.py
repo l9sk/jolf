@@ -6,7 +6,7 @@ from os import kill
 from config import AFL_FUZZ, KLEE, PREFIXES
 import subprocess
 from collections import OrderedDict
-import tempfile, shutil
+import tempfile, shutil, filecmp
 
 class Jolf:
     def LOG_AFL_PROGRESS(self):
@@ -17,9 +17,13 @@ class Jolf:
     
     def LOG_KLEE_PROGRESS(self):
         log_file = open(os.path.join(self.all_output_dir, "klee-progress.log"), "a+")
+        for t in self.klee_progress:
+            log_file.write("%s %s"%(t[0], t[1]))
+        """
         for src in self.klee_progress.keys():
             for llvm in self.klee_progress[src].keys():
                 log_file.write("%s %s %s\n"%(src, llvm, self.klee_progress[src][llvm]))
+        """
         log_file.close()
 
     def LOG_PROCESS(self, pid):
@@ -39,7 +43,7 @@ class Jolf:
             if s in self.written_coverage:
                 continue
             for tup in self.coverage_list[s]:
-                coverage_file.write("%s: %s: %s %d\n"%(time.ctime(s), tup[0], tup[1], tup[2]))
+                coverage_file.write("%s, %s, %s, %d\n"%(time.ctime(s), tup[0], tup[1], tup[2]))
             self.written_coverage.append(s)
         coverage_file.close()
 
@@ -92,8 +96,8 @@ class Jolf:
         else:
             timeout = []
 
-        other_args = ["-only-output-states-covering-new", "-max-instruction-time=10", "-suppress-external-warnings", "-write-cov", "-istats-write-interval=1"]
-        sym_args = ["--sym-args", "1", "3", "3", "--sym-files", "1", str(sym_file_size)]
+        other_args = ["-only-output-states-covering-new", "-max-instruction-time=10", "-suppress-external-warnings", "-write-cov", "-istats-write-interval=1", "-stats-write-interval=1", "-write-cvcs", "-output-module", "-max-memory=1000", "-allow-external-sym-calls", "-use-batching-search", "-batch-instructions=10000"]
+        sym_args = ["A", "--sym-args", "0", "2", "3", "--sym-files", "1", str(sym_file_size), "-sym-stdout"]
 
         try:
             ret = subprocess.Popen(klee_command + seeding_from_afl + libc + output + timeout + other_args + [klee_object] + sym_args)
@@ -171,19 +175,32 @@ class Jolf:
     def get_klee_coverage(self, klee_out_dir):
         new_covered = []
 
+        while (not os.path.exists(os.path.join(klee_out_dir, "run.istats"))): # Klee should have at least done something 
+            continue
+        
+        tmp_istats_dir = tempfile.mkdtemp()
+        os.system("cp " + os.path.join(os.path.join(klee_out_dir, "run.istats") + " " + tmp_istats_dir))
+        covered = self.parse_run_istats(os.path.join(tmp_istats_dir, "run.istats"))
+        
+        for k in covered.keys():
+            file_name = os.path.basename(k)
+            for src in covered[k].keys():
+                line_no = src
+                if not(any([ (("AFL", file_name, line_no) in v or ("KLEE", file_name, line_no) in v) for v in self.coverage_list.values() ])):
+                    new_covered.append(("KLEE", file_name, line_no)) 
+        
+        shutil.rmtree(tmp_istats_dir)
+
+        """
         for f in glob.glob(klee_out_dir+"/*.cov"):
             cov_file = open(f, "r")
             for line in cov_file:
-                """
-                if not line.startswith(self.PREFIXES[0]):
-                    continue
-                """ 
                 #file_name = line.strip().split(":")[0].split(self.PREFIXES[0])[-1]
                 file_name = line.strip().split(":")[0].strip()
                 line_no = int(line.strip().split(":")[-1])
                 if not(any([ (("AFL", os.path.basename(file_name), line_no) in v or ("KLEE", os.path.basename(file_name), line_no) in v) for v in self.coverage_list.values() ])):
                     new_covered.append(("KLEE", os.path.basename(file_name), line_no)) 
-
+        """
         return new_covered
 
     def sort_inputs_by_size(self, input_dirs):
@@ -225,7 +242,7 @@ class Jolf:
 
     def dispatch(self):
         seed_inputs_dir = self.prepare_directory()
-        if self.mode != "coverage":
+        if self.mode in ["saturation", "timed"]:
             self.check_klee()
             self.check_afl()
         
@@ -303,6 +320,44 @@ class Jolf:
 
         return seed_inputs_dir
 
+    def _dispatch_klee(self, seed_inputs_dir):
+        self.start_time = time.time()
+        
+        proc = self.call_klee(os.path.join(self.all_output_dir, "klee-1"), 0, self.klee_object, [])
+        self.LOG_PROCESS(proc.pid)
+
+        while time.time()-self.start_time<int(self.max_time_each):
+            new_covered = self.get_klee_coverage(os.path.join(self.all_output_dir, "klee-1"))
+            self.coverage_list[time.time()] = new_covered
+            self.write_coverage()
+            time.sleep(5) # Takes a lot of time for KLEE to generate anything meaningful
+        
+        kill(proc.pid, signal.SIGINT)
+        time.sleep(10) # Might take a long time for KLEE to be killed properly
+        new_covered = self.get_klee_coverage(os.path.join(self.all_output_dir, "klee-1"))
+        self.coverage_list[time.time()] = new_covered
+        self.write_coverage()
+
+    def _dispatch_afl(self, seed_inputs_dir):
+        self.start_time = time.time()
+        
+        proc = self.call_afl(0, seed_inputs_dir, os.path.join(self.all_output_dir, "fuzzing-1"), self.afl_object, " ")
+        self.LOG_PROCESS(proc.pid)
+        self.call_afl_cov(os.path.join(self.all_output_dir, "fuzzing-1"), self.coverage_executable, " ", self.coverage_source, True)
+        
+        # Keep writing coverage every five seconds
+        while time.time()-self.start_time<int(self.max_time_each):
+            new_covered = self.get_afl_coverage(os.path.join(self.all_output_dir, "fuzzing-1"))
+            self.coverage_list[time.time()] = new_covered
+            self.write_coverage()
+            time.sleep(5) # 1 second more than how often plot_data is updated 
+        
+        kill(proc.pid, signal.SIGINT)
+        time.sleep(3) # Wait for AFL to exit
+        new_covered = self.get_afl_coverage(os.path.join(self.all_output_dir, "fuzzing-1"))
+        self.coverage_list[time.time()] = new_covered
+        self.write_coverage()
+    
     def _dispatch_timed(self, seed_inputs_dir):
         self.start_time = time.time()
         
@@ -452,26 +507,26 @@ class Jolf:
 
     def parse_run_istats(self, istats_file):
         istats = open(istats_file)
-        found_new = False
+        
+        covered = {}
+        
+        cur_file = None
         
         for line in istats:
+            if line.startswith("fl="):
+                cur_file = line.split("=")[1].strip()
+                continue
+
             tokens = line.split()
             if len(tokens)!=15:
                 continue
-            llvm, src, cov = int(tokens[0]), int(tokens[1]), int(tokens[2]) # Read source-level coverage rather than LLVM level
+            src, cov = int(tokens[1]), int(tokens[2]) # Read source-level coverage rather than LLVM level
             
             if (cov>0):
-                if src not in self.klee_progress.keys(): # Definitely new source-level coverage
-                    self.klee_progress[src] = {}
-                    self.klee_progress[src][llvm] = cov # The same line number could have been from any source file. Use LLVM instruction number to differentiate
-                    found_new = True
-                elif llvm not in self.klee_progress[src].keys(): # The covered LLVM instruction is newly covered, but source line was seen before
-                    self.klee_progress[src][llvm] = cov # The source line corresponds to a different file number from the one seen before
-                    found_new = True
-                else:
-                    found_new = False # The pair (llvm, src) has been seen before. No new coverage
-
-        return found_new
+                if cur_file not in covered.keys(): # The covered file is newly covered
+                    covered[cur_file] = {}
+                covered[cur_file][src] = cov
+        return covered
 
     def klee_saturated(self, i):
         if (time.time() - self.start_time) > int(self.max_time_each):
@@ -480,20 +535,37 @@ class Jolf:
         
         while (not os.path.exists(os.path.join(os.path.join(self.all_output_dir, "klee-"+str(i)), "run.istats"))): # Klee should have at least done something 
             continue
-        len_old_covered = len([len(self.klee_progress[k].keys()) for k in self.klee_progress.keys()])
-        new_covered = {}
-
+        len_old_covered = len(self.klee_progress)
+        
+        ret = False
         tmp_istats_dir = tempfile.mkdtemp()
         os.system("cp " + os.path.join(os.path.join(self.all_output_dir, "klee-"+str(i)), "run.istats") + " " + tmp_istats_dir)
         new_covered = self.parse_run_istats(os.path.join(tmp_istats_dir, "run.istats"))
+        for f in new_covered.keys():
+            for l in new_covered[f].keys():
+                if (f, l) not in self.klee_progress:
+                    self.klee_progress.append((f, l))
+                    ret = False
+        
+        shutil.rmtree(tmp_istats_dir)
+        
+        if len(self.klee_progress)>len_old_covered:
+            self.LOG("Continuing KLEE. Line coverage increased from %d to %d"%(len_old_covered, len(self.klee_progress)))
+            return False
+        else:
+            self.LOG("KLEE saturated. No new line-coverage found")
+            return True
+
+        """
         if new_covered:
-            len_new_covered = len([len(self.klee_progress[k].keys()) for k in self.klee_progress.keys()])
-            self.LOG("Continuing KLEE. Line coverage increased from %d to %d"%(len_old_covered, len_new_covered))
+            len_new_covered = len([len(new_covered[k].keys()) for k in new_covered.keys()])
+            self.LOG("Continuing KLEE. New line coverage found in %d files"%(len(new_covered.keys())))
             return False
 
         self.LOG("KLEE saturated. No new line-coverage found")
         shutil.rmtree(tmp_istats_dir)
         return True
+        """
 
     def _dispatch_saturation(self, seed_inputs_dir):
         self.start_time = time.time()
@@ -598,7 +670,7 @@ class Jolf:
 
 
         self.afl_progress = {} # Used to store values from plot_data and to determine if AFL has saturated
-        self.klee_progress = {} # Used to store values from run.istats and to determine if KLEE has saturated
+        self.klee_progress = [] # Used to store values from run.istats and to determine if KLEE has saturated
         self.coverage_list = {}
         self.written_coverage = []
 
@@ -614,5 +686,9 @@ class Jolf:
             self.dispatch_method = self._dispatch_coverage
         elif self.mode=="saturation":
             self.dispatch_method = self._dispatch_saturation
+        elif self.mode=="klee":
+            self.dispatch_method = self._dispatch_klee
+        elif self.mode=="afl":
+            self.dispatch_method = self._dispatch_afl
         
         self.PREFIXES = PREFIXES
