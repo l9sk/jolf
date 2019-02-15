@@ -3,7 +3,7 @@ from read_klee_testcases import process_klee_out
 #from read_afl_testcases import main as rat_main
 import os, sys, time, glob, signal, json
 from os import kill
-from config import AFL_FUZZ, KLEE, PREFIXES
+from config import AFL_FUZZ, KLEE
 import subprocess
 from collections import OrderedDict
 import tempfile, shutil, filecmp
