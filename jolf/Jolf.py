@@ -3,7 +3,7 @@ from read_klee_testcases import process_klee_out
 #from read_afl_testcases import main as rat_main
 import os, sys, time, glob, signal, json
 from os import kill
-from config import AFL_FUZZ, KLEE
+from config import AFL_FUZZ, KLEE, AFL_COV
 import subprocess
 from collections import OrderedDict
 import tempfile, shutil, filecmp
@@ -272,7 +272,7 @@ class Jolf:
             live_arg = "--live --background --quiet --sleep 2"
         else:
             live_arg = ""
-        ret = os.system("afl-cov -d %s %s --coverage-cmd \"%s %s AFL_FILE\" --code-dir %s --coverage-include-lines >> %s 2>&1"%(afl_output_dir, live_arg, coverage_executable, afl_command_args, coverage_source, os.path.join(self.all_output_dir, "afl-cov.out")))
+        ret = os.system("%s -d %s %s --coverage-cmd \"%s %s AFL_FILE\" --code-dir %s --coverage-include-lines >> %s 2>&1"%(AFL_COV, afl_output_dir, live_arg, coverage_executable, afl_command_args, coverage_source, os.path.join(self.all_output_dir, "afl-cov.out")))
 
         if ret==0:
             self.LOG("Dispatching afl-cov was successful\n\t%s"%(afl_output_dir))
